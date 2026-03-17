@@ -1,4 +1,4 @@
-# CLAUDIT
+# CLAUDIT-SEC
 
 **Security audit tool for Claude Desktop and Claude Code on macOS.**
 

@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Before submitting, please check [existing issues](https://github.com/HarmonicSecurity/claudit-sec/issues) and review the [scope constraints in CONTRIBUTING.md](https://github.com/HarmonicSecurity/claudit-sec/blob/main/CONTRIBUTING.md#scope).
+        Before submitting, please check [existing issues](https://github.com/HarmonicSecurity/claudit-sec/issues).
 
   - type: textarea
     id: description

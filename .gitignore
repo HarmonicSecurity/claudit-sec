@@ -1,9 +1,22 @@
 # macOS
 .DS_Store
+._*
 
 # Audit output
 *.html
 *.json
+
+# Editor / IDE
+*.swp
+*.swo
+*~
+*.bak
+.vscode/
+.idea/
+
+# Environment / secrets
+.env
+.env.*
 
 # Claude Code
 .claude/

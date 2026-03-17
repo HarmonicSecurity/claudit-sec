@@ -1,0 +1,55 @@
+name: Feature Request
+description: Suggest a new feature or improvement
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before submitting, please check [existing issues](https://github.com/HarmonicSecurity/claudit-sec/issues) and review the [scope constraints in CONTRIBUTING.md](https://github.com/HarmonicSecurity/claudit-sec/blob/main/CONTRIBUTING.md#scope).
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What would you like?
+      description: A clear description of the feature or improvement.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Audit Area
+      description: Which collector or area does this relate to?
+      options:
+        - Desktop Settings
+        - Cowork Settings
+        - MCP Servers
+        - Extensions (DXT)
+        - Extension Settings / Governance
+        - Plugins
+        - Connectors
+        - Skills
+        - Scheduled Tasks
+        - App Config
+        - Claude Code Settings
+        - File Permissions
+        - Runtime State
+        - Cookies
+        - Output Formatting
+        - New area (describe above)
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why does this matter?
+      description: What security visibility gap does this address?
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Any relevant config file paths, examples, or references.

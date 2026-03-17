@@ -2,15 +2,15 @@
 
 ## Project Overview
 
-CLAUDIT-SEC is a read-only, single-file security audit tool for macOS that inspects Claude Desktop and Claude Code configuration, scheduled tasks, extensions, plugins, skills, permissions, and runtime state. It exists in two implementations:
+CLAUDIT-SEC is a read-only, single-file security audit tool for macOS that inspects Claude Desktop and Claude Code configuration, scheduled tasks, extensions, plugins, skills, permissions, and runtime state.
 
 - **`claude_audit.sh`** — Zsh (~1830 lines, requires `jq`) — designed for MDM/CrowdStrike RTR style deployment
 
-Both produce identical audit data. The shell version is the primary deployment target for managed environments.
+This project is built and maintained using [Claude Code](https://docs.anthropic.com/en/docs/claude-code). This file provides architecture context and development guidelines that Claude Code uses when working on the codebase.
 
 ## Architecture
 
-Both scripts follow the same structure:
+The script follows this structure:
 
 1. **Preflight checks** — OS validation, dependency checks
 2. **User context detection** — single user, explicit `--user`, or all-users scan
@@ -136,14 +136,6 @@ When run as root (uid 0) — which is how MDMs like FleetDM, Jamf, Mosyle, and C
 - **HTML output** — created with `umask 077` (mode 0600)
 - **Username validation** — `^[a-zA-Z0-9._-]+$` with explicit `.`/`..` rejection
 
-## Python Script (`claude_audit.py`)
-
-- Python 3.8+, stdlib only (zero external dependencies)
-- Uses dataclasses for structured report data
-- Same 14 collectors and 3 renderers as the shell version
-- Additional JSON fields: `app_config`, `cookies`, `runtime`, `risk_score`, `risk_level`, `extension_settings`, `marketplace_available`, `cowork_enabled_plugins`, `cowork_marketplaces`
-- Has a `calculate_risk()` function (defined but not called in `run_audit()` — risk scoring is unused)
-
 ## CLI Reference
 
 ```
@@ -161,10 +153,9 @@ Options:
 
 ## Development Guidelines
 
-- **Single-file constraint**: Both scripts must remain self-contained single files with no external dependencies (except `jq` for the shell version)
+- **Single-file constraint**: The script must remain a self-contained single file with no external dependencies (except `jq`)
 - **Read-only invariant**: Never write to, modify, or delete any file being audited
-- **Parity**: Changes to data collection logic should be reflected in both implementations
 - **Findings format**: `severity` (CRITICAL/WARN/INFO/REVIEW/OK), `section`, `message`, `detail`
 - **Sensitive data**: Always redact tokens, keys, passwords, secrets in all output formats
-- **New collectors**: Add to both scripts, update the collector table above
-- **Testing**: Run both `python3 claude_audit.py --json` and `zsh claude_audit.sh --json`, compare finding counts and section coverage
+- **New collectors**: Add to the script, update the collector table above
+- **Testing**: Run `zsh claude_audit.sh --json` and verify finding counts and section coverage

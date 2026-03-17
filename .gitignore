@@ -1,0 +1,9 @@
+# macOS
+.DS_Store
+
+# Audit output
+*.html
+*.json
+
+# Claude Code
+.claude/

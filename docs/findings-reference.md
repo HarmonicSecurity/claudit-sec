@@ -1,6 +1,6 @@
 # 📋 CLAUDIT-SEC Findings Reference
 
-> **A comprehensive reference for every check performed by CLAUDIT-SEC v2.1.0**
+> **A comprehensive reference for every check performed by CLAUDIT-SEC v2.2.0**
 >
 > This document is intended for security teams, compliance reviewers, and administrators who need to understand exactly what CLAUDIT inspects, why each check matters, and how to respond when findings are flagged.
 
@@ -496,18 +496,14 @@ Claude Desktop (as an Electron app) maintains browser-like cookie storage.
 
 ---
 
-### 🍪 Cookie File Presence and Permissions
+### 🍪 Cookie File Presence
 
-- **What**: Checks for the existence of `Cookies` and `Cookies-journal` files and runs the standard permission check on each. Reports their presence, octal mode, and permission status.
+- **What**: Checks for the existence of `Cookies` and `Cookies-journal` files. Reports whether each file is present.
 - **Why it matters**:
-  - 🔴 **Risk**: Cookie files may contain session tokens, authentication cookies, and tracking data. If these files are readable by other users, session tokens could be stolen. If writable, an attacker could inject cookies.
-  - 📜 **Compliance**: Session data should be protected with appropriate file permissions. Cookie files are sensitive authentication artifacts.
-  - 🤖 **AI enablement**: Cookie files are a normal byproduct of Electron apps. Their presence is expected; their permission status is what matters.
-- **Severity**: Permission issues on cookie files follow the same severity as other file permissions:
-  - 🔴 `CRITICAL` for group-writable or world-writable
-  - ⚠️ `WARN` for group-readable or world-readable
-  - No finding if permissions are OK
-- **Recommendation**: Ensure cookie files are `chmod 600`. If cookies have insecure permissions, also check whether the Claude Desktop directory itself has overly permissive permissions.
+  - 🔍 **Visibility**: Cookie files are a normal byproduct of Electron apps. Their presence indicates Claude Desktop has been used and has active session data on disk.
+  - 🤖 **AI enablement**: Cookie file presence is expected for users who have signed into Claude Desktop.
+- **Severity**: **Displayed in the report** — no finding generated. Cookie presence is shown for asset inventory purposes.
+- **Recommendation**: No action required. Cookie files are expected artifacts of Claude Desktop.
 
 ---
 
@@ -520,7 +516,6 @@ CLAUDIT uses five severity levels. Here is what each means and when it is applie
 | ⚠️ | `WARN` | Security-relevant finding requiring review | Autonomous capabilities enabled, unsigned extensions, dangerous tools, governance controls missing, plaintext credentials, runtime anomalies |
 | 🔍 | `REVIEW` | Notable item requiring human assessment | Org-deployed remote plugins (expected but should be verified) |
 | ℹ️ | `INFO` | Informational — no action required | Processes running, permissions granted, connectors authenticated, read errors, missing directories |
-| ✅ | `OK` | No issue found | Used internally for file permissions; not emitted as a finding |
 
 ---
 
@@ -579,7 +574,7 @@ The following data is collected and displayed in the report but does **not** gen
 | Skills | User skills, plugin skills (name, description, path) | Behavior/prompt inventory |
 | Scheduled Tasks | Disabled tasks | Historical workflow inventory |
 | App Config | Network mode, device ID (ant-did) | Configuration context |
-| Cookies | Cookie file presence and mode | Artifact inventory |
+| Cookies | Cookie file presence | Artifact inventory |
 
 ---
 
@@ -601,4 +596,4 @@ CLAUDIT also builds a **Recommendations** list at the end of the report. Recomme
 
 ---
 
-*This document was generated for CLAUDIT-SEC v2.1.0. Last updated: 2026-03-18.*
+*This document was generated for CLAUDIT-SEC v2.2.0. Last updated: 2026-03-18.*

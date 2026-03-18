@@ -3,7 +3,7 @@
 # Read-only, single-file audit for macOS. Requires: zsh, jq, macOS.
 setopt PIPE_FAIL KSH_ARRAYS BASH_REMATCH TYPESET_SILENT NULL_GLOB
 
-VERSION="2.1.0"
+VERSION="2.2.0"
 CLAUDE_DESKTOP_DIR="Library/Application Support/Claude"
 CLAUDE_CODE_DIR=".claude"
 DANGEROUS_TOOLS="execute_javascript write_file edit_file run_command execute_sql"
@@ -53,15 +53,13 @@ EXT_IDS=() ; EXT_NAMES=() ; EXT_VERS=() ; EXT_AUTHORS=() ; EXT_SIGNEDS=()
 EXT_SIG_STATS=() ; EXT_TOOLS_STR=() ; EXT_DANGER_STR=() ; EXT_INST_ATS=()
 EXT_DESCS=()
 
-# File Permissions
-FP_PATHS=() ; FP_MODES=() ; FP_STATS=()
 
 # Blocklist / Code settings
 BLOCKLIST_ENTRIES=0 ; BLOCKLIST_STATUS=""
 CLAUDE_CODE_JSON="{}"
 
 # Counters
-WARN_COUNT=0 ; INFO_COUNT=0 ; CRITICAL_COUNT=0
+WARN_COUNT=0 ; INFO_COUNT=0
 
 # Session dirs found
 SESSION_DIRS=()
@@ -112,29 +110,6 @@ safe_read_text() { # _path -> stdout=text, sets JSON_ERROR
     cat "$_path" 2>/dev/null || { JSON_ERROR="READ_ERROR"; return 1; }
 }
 
-get_file_permission() { # _path -> appends to FP arrays
-    local _path="$1"
-    [[ -e "$_path" ]] || return 0
-    local mode_oct
-    mode_oct=$(stat -f '%Lp' "$_path" 2>/dev/null) || return 0
-    local mode_int
-    mode_int=$((8#$mode_oct))
-    local issues=()
-    ((mode_int & 8#020)) && issues+=("group-writable")
-    ((mode_int & 8#002)) && issues+=("world-writable")
-    ((mode_int & 8#040)) && issues+=("group-readable")
-    ((mode_int & 8#004)) && issues+=("world-readable")
-    local perm_status="OK"
-    if ((${#issues[@]} > 0)); then
-        local has_write=false
-        for iss in "${issues[@]}"; do [[ "$iss" == *writable* ]] && has_write=true; done
-        local sev="WARN"; [[ "$has_write" == "true" ]] && sev="CRITICAL"
-        local joined
-        joined=$(IFS=', '; echo "${issues[*]}")
-        perm_status="${sev}: ${joined}"
-    fi
-    FP_PATHS+=("$_path"); FP_MODES+=("$mode_oct"); FP_STATS+=("$perm_status")
-}
 
 fmt_bytes() {
     local n="$1"
@@ -240,7 +215,7 @@ VALID_USER_RE='^[a-zA-Z0-9._-]+$'
 detect_user_contexts() { # sets USER_CONTEXTS array of "user|home" pairs
     USER_CONTEXTS=()
     if [[ -n "${OPT_USER:-}" ]]; then
-        if [[ ! "$OPT_USER" =~ $VALID_USER_RE ]] || [[ "$OPT_USER" == "." || "$OPT_USER" == ".." ]]; then
+        if [[ ! "$OPT_USER" =~ $VALID_USER_RE ]] || [[ "$OPT_USER" =~ ^\.+$ ]]; then
             echo "Invalid username: '$OPT_USER'." >&2; exit 1
         fi
         USER_CONTEXTS+=("$OPT_USER|/Users/$OPT_USER"); return
@@ -341,13 +316,12 @@ collect_desktop_settings() { # claude_dir
             srv_data=$(printf '%s' "$mcp_json" | jq -c --arg n "$sname" '.[$n]')
             local cmd args_str env_keys
             cmd=$(printf '%s' "$srv_data" | jq -r '.command // "[unknown]"')
-            args_str=$(printf '%s' "$srv_data" | jq -r '(.args // []) | map(if test("(sk-|key=|token=|secret=|password=)";"i") then "[REDACTED]" else . end) | join(" ")')
+            args_str=$(printf '%s' "$srv_data" | jq -r '(.args // []) | map(if test("(sk-|[_-]?key[_=-]|[_-]?token[_=-]|[_-]?secret[_=-]|[_-]?password[_=-]|[_-]?passwd[_=-]|[_-]?auth[_=-]|[_-]?credential[s]?[_=-]|[_-]?api[_-]?key|://[^@]+@)";"i") then "[REDACTED]" else . end) | join(" ")')
             env_keys=$(printf '%s' "$srv_data" | jq -r '.env // {} | keys | join(", ")')
             [[ -z "$env_keys" ]] && env_keys="-"
             MCP_NAMES+=("$sname"); MCP_CMDS+=("$cmd"); MCP_ARGS_STR+=("$args_str"); MCP_ENV_KEYS+=("$env_keys")
         done <<< "$srv_names"
     fi
-    get_file_permission "$config_path"
 }
 
 collect_cowork_settings() { # uses SESSION_DIRS
@@ -412,7 +386,6 @@ collect_app_config() { # claude_dir
     if [[ -n "$ant_did" ]]; then
         RUNTIME_INFO[ant_did]="$ant_did"; APP_CONFIG["ant-did"]="$ant_did"
     fi
-    get_file_permission "$config_path"
 }
 
 collect_extensions() { # claude_dir
@@ -473,7 +446,6 @@ collect_extensions() { # claude_dir
         [[ "$esigned" == "false" ]] && add_finding "WARN" "Extensions" "Unsigned extension: $ename" "version=$eversion"
         [[ -n "$danger_str" ]] && add_finding "WARN" "Extensions" "Extension '$ename' has dangerous tools: ${danger_str//,/, }"
     done
-    get_file_permission "$ext_path"
 }
 
 collect_extension_settings() { # claude_dir
@@ -489,7 +461,6 @@ collect_extension_settings() { # claude_dir
         local ext_name
         ext_name=$(basename "$sf" .json)
         EXT_SETTINGS_JSON["$ext_name"]="$data"
-        get_file_permission "$sf"
     done
 }
 
@@ -628,7 +599,7 @@ collect_plugins() { # uses SESSION_DIRS
                     local cpname; cpname=$(basename "$cpd")
                     [[ -z "${installed_names[$cpname]:-}" && -z "${remote_names[$cpname]:-}" ]] || continue
                     local latest_ver
-                    latest_ver=$(ls -1d "$cpd"*/ 2>/dev/null | sort -t. -k1,1rn -k2,2rn -k3,3rn | head -1)
+                    latest_ver=$(ls -1d "$cpd"*/ 2>/dev/null | sort -t. -k1,1rn -k2,2rn -k3,3rn -k4,4rn -k5,5rn | head -1)
                     [[ -n "$latest_ver" && -f "$latest_ver/.claude-plugin/plugin.json" ]] || continue
                     local cpj
                     cpj=$(safe_read_json "$latest_ver/.claude-plugin/plugin.json") || true
@@ -876,7 +847,7 @@ collect_skills() { # uses SESSION_DIRS, home
                 local cpd
                 for cpd in "$mp_dir"*/; do
                     [[ -d "$cpd" ]] || continue
-                    local latest; latest=$(ls -1d "$cpd"*/ 2>/dev/null | sort -t. -k1,1rn -k2,2rn -k3,3rn | head -1)
+                    local latest; latest=$(ls -1d "$cpd"*/ 2>/dev/null | sort -t. -k1,1rn -k2,2rn -k3,3rn -k4,4rn -k5,5rn | head -1)
                     [[ -n "$latest" ]] || continue
                     local pj_path="$latest/.claude-plugin/plugin.json"
                     local plugin_name=""
@@ -998,7 +969,6 @@ collect_blocklist() { # claude_dir
     else
         BLOCKLIST_STATUS="$total entries"
     fi
-    get_file_permission "$bl_path"
 }
 
 collect_claude_code_settings() { # home
@@ -1011,31 +981,8 @@ collect_claude_code_settings() { # home
     local allow
     allow=$(printf '%s' "$data" | jq -r '.permissions.allow // [] | join(", ")' 2>/dev/null) || true
     [[ -n "$allow" ]] && add_finding "INFO" "Claude Code" "Permissions granted: $allow"
-    get_file_permission "$settings_path"
 }
 
-collect_file_permissions() { # claude_dir home
-    local claude_dir="$1" home="$2"
-    local extra_paths=(
-        "$claude_dir/claude_desktop_config.json"
-        "$claude_dir/config.json"
-        "$claude_dir/extensions-installations.json"
-        "$claude_dir/extensions-blocklist.json"
-        "$home/$CLAUDE_CODE_DIR/settings.json"
-    )
-    local -A existing
-    local i; for ((i=0; i<${#FP_PATHS[@]}; i++)); do existing["${FP_PATHS[$i]}"]=1; done
-    for p in "${extra_paths[@]}"; do
-        [[ -z "${existing[$p]:-}" ]] && get_file_permission "$p"
-    done
-    for ((i=0; i<${#FP_PATHS[@]}; i++)); do
-        if [[ "${FP_STATS[$i]}" != "OK" ]]; then
-            local sev="WARN"; [[ "${FP_STATS[$i]}" == CRITICAL* ]] && sev="CRITICAL"
-            local short; short=$(basename "${FP_PATHS[$i]}")
-            add_finding "$sev" "File Permissions" "Insecure permissions on $short: ${FP_STATS[$i]}" "Mode: ${FP_MODES[$i]}, Path: ${FP_PATHS[$i]}"
-        fi
-    done
-}
 
 collect_runtime() { # claude_dir home
     local claude_dir="$1" home="$2"
@@ -1099,11 +1046,7 @@ collect_cookies() { # claude_dir
     for label in Cookies Cookies-journal; do
         _path="$claude_dir/$label"
         [[ -e "$_path" ]] || continue
-        get_file_permission "$_path"
-        local idx=$(( ${#FP_PATHS[@]} - 1 ))
         COOKIES_INFO["${label}_present"]="true"
-        COOKIES_INFO["${label}_mode"]="${FP_MODES[$idx]}"
-        COOKIES_INFO["${label}_status"]="${FP_STATS[$idx]}"
     done
 }
 
@@ -1139,10 +1082,6 @@ build_recommendations() {
     local al_count=0
     for ((i=0; i<${#FINDING_MSG[@]}; i++)); do [[ "${(L)FINDING_MSG[$i]}" == *"allowlist disabled"* ]] && ((al_count++)); done
     ((al_count > 0)) && RECOMMENDATIONS+=("Extension allowlist disabled ($al_count org scope(s))")
-
-    local perm_count=0
-    for ((i=0; i<${#FP_STATS[@]}; i++)); do [[ "${FP_STATS[$i]}" != "OK" ]] && ((perm_count++)); done
-    ((perm_count > 0)) && RECOMMENDATIONS+=("$perm_count config file(s) with overly permissive permissions — chmod 600")
 
     [[ "${COWORK_PREFS[coworkWebSearchEnabled]:-false}" == "true" ]] && \
         RECOMMENDATIONS+=("Cowork web search enabled — autonomous internet access")
@@ -1438,12 +1377,6 @@ BANNER
         [[ "${FINDING_SECT[$i]}" == "Security" && "${(L)FINDING_MSG[$i]}" == *blocklist* ]] && {
             echo "  $(_sev_color "${FINDING_SEV[$i]}" "[${FINDING_SEV[$i]}]") ${FINDING_MSG[$i]}"; found_sec=true; }
     done
-    local perm_iss=false; local -A pseen
-    for ((i=0;i<${#FP_STATS[@]};i++)); do
-        [[ "${FP_STATS[$i]}" != "OK" && -z "${pseen[${FP_PATHS[$i]}]:-}" ]] || continue
-        [[ "$perm_iss" == "true" ]] || { echo "  $(_yellow 'File permission issues:')"; perm_iss=true; found_sec=true; }
-        pseen["${FP_PATHS[$i]}"]=1; echo "    $(basename "${FP_PATHS[$i]}") (${FP_MODES[$i]}): ${FP_STATS[$i]}"
-    done
     for ((i=0;i<${#FINDING_SEV[@]};i++)); do
         [[ "${FINDING_SECT[$i]}" == "Runtime" && "${FINDING_SEV[$i]}" != "INFO" && "${FINDING_SEV[$i]}" != "OK" ]] && {
             echo "  $(_sev_color "${FINDING_SEV[$i]}" "[${FINDING_SEV[$i]}]") ${FINDING_MSG[$i]}"; found_sec=true; }
@@ -1668,13 +1601,6 @@ HTMLEOF
         [[ "$quiet" == "true" && "${FINDING_SEV[$i]}" != "CRITICAL" && "${FINDING_SEV[$i]}" != "WARN" ]] && continue
         printf '<div class="finding">%s %s</div>\n' "$(_badge_html "${FINDING_SEV[$i]}")" "$(_h "${FINDING_MSG[$i]}")"; fany=true
     done
-    local has_pt=false; local -A psh
-    for ((i=0;i<${#FP_STATS[@]};i++)); do
-        [[ "${FP_STATS[$i]}" == "OK" || -n "${psh[${FP_PATHS[$i]}]:-}" ]] && continue
-        [[ "$has_pt" == "true" ]] || { echo '<table><tr><th>File</th><th>Mode</th><th>Issue</th></tr>'; has_pt=true; fany=true; }
-        psh["${FP_PATHS[$i]}"]=1
-        printf '<tr><td><code>%s</code></td><td>%s</td><td style="color:#ffc107">%s</td></tr>\n' "$(_h "$(basename "${FP_PATHS[$i]}")")" "$(_h "${FP_MODES[$i]}")" "$(_h "${FP_STATS[$i]}")"
-    done; [[ "$has_pt" == "true" ]] && echo '</table>'
     for ((i=0;i<${#FINDING_SEV[@]};i++)); do
         [[ "${FINDING_SECT[$i]}" == "Runtime" && "${FINDING_SEV[$i]}" != "INFO" && "${FINDING_SEV[$i]}" != "OK" ]] && {
             printf '<div class="finding">%s %s</div>\n' "$(_badge_html "${FINDING_SEV[$i]}")" "$(_h "${FINDING_MSG[$i]}")"; fany=true; }
@@ -1731,20 +1657,16 @@ render_json() {
         ext_j+="{\"ext_id\":$(_jstr "${EXT_IDS[$i]}"),\"name\":$(_jstr "${EXT_NAMES[$i]}"),\"version\":$(_jstr "${EXT_VERS[$i]}"),\"author\":$(_jstr "${EXT_AUTHORS[$i]}"),\"signed\":${EXT_SIGNEDS[$i]},\"signature_status\":$(_jstr "${EXT_SIG_STATS[$i]}"),\"dangerous_tools\":$(_jstr "${EXT_DANGER_STR[$i]}")}"
     done; ext_j+="]"
 
-    local fp_j="["; for ((i=0;i<${#FP_PATHS[@]};i++)); do ((i>0)) && fp_j+=","
-        fp_j+="{\"path\":$(_jstr "${FP_PATHS[$i]}"),\"mode\":$(_jstr "${FP_MODES[$i]}"),\"status\":$(_jstr "${FP_STATS[$i]}")}"
-    done; fp_j+="]"
-
     local dp_j="{\"keepAwakeEnabled\":${DESKTOP_PREFS[keepAwakeEnabled]:-false},\"menuBarEnabled\":${DESKTOP_PREFS[menuBarEnabled]:-false}}"
     local cp_j="{\"coworkScheduledTasksEnabled\":${COWORK_PREFS[coworkScheduledTasksEnabled]:-false},\"ccdScheduledTasksEnabled\":${COWORK_PREFS[ccdScheduledTasksEnabled]:-false},\"coworkWebSearchEnabled\":${COWORK_PREFS[coworkWebSearchEnabled]:-false}}"
 
-    printf '{"timestamp":%s,"hostname":%s,"username":%s,"home_dir":%s,"findings":%s,"desktop_prefs":%s,"cowork_prefs":%s,"cowork_network_mode":%s,"mcp_servers":%s,"plugins":%s,"connectors":%s,"skills":%s,"scheduled_tasks":%s,"extensions":%s,"blocklist_entries":%d,"blocklist_status":%s,"claude_code_settings":%s,"file_permissions":%s,"warn_count":%d,"info_count":%d,"critical_count":%d}' \
+    printf '{"timestamp":%s,"hostname":%s,"username":%s,"home_dir":%s,"findings":%s,"desktop_prefs":%s,"cowork_prefs":%s,"cowork_network_mode":%s,"mcp_servers":%s,"plugins":%s,"connectors":%s,"skills":%s,"scheduled_tasks":%s,"extensions":%s,"blocklist_entries":%d,"blocklist_status":%s,"claude_code_settings":%s,"warn_count":%d,"info_count":%d}' \
         "$(_jstr "$TIMESTAMP")" "$(_jstr "$HOSTNAME_VAL")" "$(_jstr "$AUDIT_USER")" "$(_jstr "$HOME_DIR")" \
         "$findings_j" "$dp_j" "$cp_j" "$(_jstr "$COWORK_NETWORK_MODE")" \
         "$mcp_j" "$plg_j" "$conn_j" "$sk_j" "$st_j" "$ext_j" \
-        "$BLOCKLIST_ENTRIES" "$(_jstr "$BLOCKLIST_STATUS")" "$CLAUDE_CODE_JSON" "$fp_j" \
-        "$WARN_COUNT" "$INFO_COUNT" "$CRITICAL_COUNT" | \
-    jq 'def redact: if type=="object" then to_entries|map(if .key|test("oauth|token|tokenCache|secret|password|credential|apiKey|api_key|access_token|refresh_token|private_key|privateKey";"i") then .value="[REDACTED]" else .value=(.value|redact) end)|from_entries elif type=="array" then map(redact) else . end; redact'
+        "$BLOCKLIST_ENTRIES" "$(_jstr "$BLOCKLIST_STATUS")" "$CLAUDE_CODE_JSON" \
+        "$WARN_COUNT" "$INFO_COUNT" | \
+    jq 'def redact_val: if type=="string" and test("(sk-[a-zA-Z0-9]{20,}|://[^@\\s]+@)";"x") then "[REDACTED]" else . end; def redact: if type=="object" then to_entries|map(if .key|test("oauth|token|tokenCache|secret|password|credential|apiKey|api_key|access_token|refresh_token|private_key|privateKey";"i") then .value="[REDACTED]" else .value=(.value|redact) end)|from_entries elif type=="array" then map(redact) elif type=="string" then redact_val else . end; redact'
 }
 
 # ── Run Audit ─────────────────────────────────────────────────────────────────
@@ -1765,7 +1687,6 @@ run_audit() {
     ST_CREATED=(); ST_SNAMES=(); ST_SDESCS=(); ST_PROMPTS=()
     EXT_IDS=(); EXT_NAMES=(); EXT_VERS=(); EXT_AUTHORS=(); EXT_SIGNEDS=()
     EXT_SIG_STATS=(); EXT_TOOLS_STR=(); EXT_DANGER_STR=(); EXT_INST_ATS=(); EXT_DESCS=()
-    FP_PATHS=(); FP_MODES=(); FP_STATS=()
     BLOCKLIST_ENTRIES=0; BLOCKLIST_STATUS=""; CLAUDE_CODE_JSON="{}"
     COWORK_ENABLED_PLUGINS=(); COWORK_NETWORK_MODE=""; RECOMMENDATIONS=()
     declare -gA DESKTOP_PREFS=() COWORK_PREFS=() APP_CONFIG=() RUNTIME_INFO=() COOKIES_INFO=()
@@ -1786,13 +1707,12 @@ run_audit() {
     collect_scheduled_tasks
     collect_blocklist "$claude_dir"
     collect_claude_code_settings "$home"
-    collect_file_permissions "$claude_dir" "$home"
     collect_runtime "$claude_dir" "$home"
     collect_cookies "$claude_dir"
 
-    WARN_COUNT=0; INFO_COUNT=0; CRITICAL_COUNT=0
+    WARN_COUNT=0; INFO_COUNT=0
     for ((i=0;i<${#FINDING_SEV[@]};i++)); do
-        case "${FINDING_SEV[$i]}" in WARN) ((WARN_COUNT++));; INFO) ((INFO_COUNT++));; CRITICAL) ((CRITICAL_COUNT++));; esac
+        case "${FINDING_SEV[$i]}" in WARN) ((WARN_COUNT++));; INFO) ((INFO_COUNT++));; esac
     done
     build_recommendations
 }
@@ -1826,10 +1746,11 @@ for ctx in "${USER_CONTEXTS[@]}"; do
         render_json
     elif [[ -n "$OPT_HTML" ]]; then
         filename=""
-        if [[ "$OPT_HTML" == "AUTO" ]]; then filename="claude_audit_${ctx_user}_$(date '+%Y%m%d_%H%M%S').html"
+        local safe_user; safe_user=$(printf '%s' "$ctx_user" | tr -cd 'a-zA-Z0-9_-')
+        if [[ "$OPT_HTML" == "AUTO" ]]; then filename="claude_audit_${safe_user}_$(date '+%Y%m%d_%H%M%S').html"
         elif ((${#USER_CONTEXTS[@]} > 1)); then
             base="${OPT_HTML%.*}"; ext="${OPT_HTML##*.}"
-            [[ "$base" == "$OPT_HTML" ]] && ext=""; filename="${base}_${ctx_user}${ext:+.$ext}"
+            [[ "$base" == "$OPT_HTML" ]] && ext=""; filename="${base}_${safe_user}${ext:+.$ext}"
         else filename="$OPT_HTML"; fi
         (umask 077; render_html "$OPT_QUIET" > "$filename")
         echo "HTML report written to: $filename" >&2

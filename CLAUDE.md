@@ -4,7 +4,7 @@
 
 CLAUDIT-SEC is a read-only, single-file security audit tool for macOS that inspects Claude Desktop and Claude Code configuration, scheduled tasks, extensions, plugins, skills, permissions, and runtime state.
 
-- **`claude_audit.sh`** — Zsh (~1830 lines, requires `jq`) — designed for MDM/CrowdStrike RTR style deployment
+- **`claude_audit.sh`** — Zsh (~1780 lines, requires `jq`) — designed for MDM/CrowdStrike RTR style deployment
 
 This project is built and maintained using [Claude Code](https://docs.anthropic.com/en/docs/claude-code). This file provides architecture context and development guidelines that Claude Code uses when working on the codebase.
 
@@ -15,8 +15,8 @@ The script follows this structure:
 1. **Preflight checks** — OS validation, dependency checks
 2. **User context detection** — single user, explicit `--user`, or all-users scan
 3. **Session directory discovery** — finds `local-agent-mode-sessions/org/user/` paths
-4. **14 data collectors** — each reads specific config files and populates findings
-5. **Finding aggregation** — counts by severity (CRITICAL, WARN, INFO, REVIEW)
+4. **13 data collectors** — each reads specific config files and populates findings
+5. **Finding aggregation** — counts by severity (WARN, INFO, REVIEW)
 6. **3 output renderers** — ASCII (ANSI color + Unicode tables), HTML (dark theme), JSON (SIEM-ready)
 
 ### Data Collectors
@@ -34,7 +34,6 @@ The script follows this structure:
 | Extension Settings | `Claude Extensions Settings/*.json` | Allowed directories |
 | Blocklist | `extensions-blocklist.json` | Governance control presence |
 | Claude Code Settings | `~/.claude/settings.json` | Permission grants |
-| File Permissions | stat() on all config files | Group/world readable/writable |
 | Runtime | pgrep, pmset, crontab, LaunchAgents | Running processes, sleep assertions |
 | Cookies | `Cookies`, `Cookies-journal` | Presence and permissions |
 
@@ -155,7 +154,7 @@ Options:
 
 - **Single-file constraint**: The script must remain a self-contained single file with no external dependencies (except `jq`)
 - **Read-only invariant**: Never write to, modify, or delete any file being audited
-- **Findings format**: `severity` (CRITICAL/WARN/INFO/REVIEW/OK), `section`, `message`, `detail`
+- **Findings format**: `severity` (WARN/INFO/REVIEW), `section`, `message`, `detail`
 - **Sensitive data**: Always redact tokens, keys, passwords, secrets in all output formats
 - **New collectors**: Add to the script, update the collector table above
 - **Testing**: Run `zsh claude_audit.sh --json` and verify finding counts and section coverage

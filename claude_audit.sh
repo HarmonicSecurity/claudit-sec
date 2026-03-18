@@ -1234,7 +1234,7 @@ ascii_table() { # "H1|H2" "row1col1|row1col2\nrow2..." "w1|w2"
 render_ascii() {
     local quiet="${1:-false}" i w=66
     local o='\033[38;5;208m' g='\033[38;5;243m' r='\033[0m'
-    printf "${o}"
+    printf "\n${o}"
     cat <<'BANNER'
   ██████ ██       █████  ██    ██ ██████  ██ ████████       ███████ ███████  ██████
  ██      ██      ██   ██ ██    ██ ██   ██ ██    ██          ██      ██      ██
@@ -1242,7 +1242,7 @@ render_ascii() {
  ██      ██      ██   ██ ██    ██ ██   ██ ██    ██               ██ ██      ██
   ██████ ███████ ██   ██  ██████  ██████  ██    ██          ███████ ███████  ██████
 BANNER
-    printf "${g}  // Claude security auditing CLI — skills, plugins & misconfiguration detection${r}\n\n"
+    printf "\n${g}  // Claude security auditing CLI — skills, plugins & misconfiguration detection${r}\n\n"
     printf '╔'; printf '═%.0s' $(seq 1 $w); printf '╗\n'
     printf '║%*s%s%*s║\n' $(( (w-${#TIMESTAMP})/2 )) '' "$TIMESTAMP" $(( (w-${#TIMESTAMP}+1)/2 )) ''
     local info="Host: $HOSTNAME_VAL | User: $AUDIT_USER"

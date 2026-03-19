@@ -15,14 +15,15 @@
 5. [📂 Extension Settings](#5--extension-settings)
 6. [🛡️ Extension Governance (Blocklist & Allowlist)](#6--extension-governance-blocklist--allowlist)
 7. [🔗 Plugins](#7--plugins)
-8. [🌐 Connectors](#8--connectors)
-9. [🎯 Skills](#9--skills)
-10. [⏰ Scheduled Tasks](#10--scheduled-tasks)
-11. [⚙️ App Config (config.json)](#11--app-config-configjson)
-12. [💻 Claude Code Settings](#12--claude-code-settings)
-13. [🏃 Runtime State](#13--runtime-state)
-14. [🍪 Cookies](#14--cookies)
-15. [📊 Severity Level Reference](#15--severity-level-reference)
+8. [🪝 Plugin Hooks](#8--plugin-hooks)
+9. [🌐 Connectors](#9--connectors)
+10. [🎯 Skills](#10--skills)
+11. [⏰ Scheduled Tasks](#11--scheduled-tasks)
+12. [⚙️ App Config (config.json)](#12--app-config-configjson)
+13. [💻 Claude Code Settings](#13--claude-code-settings)
+14. [🏃 Runtime State](#14--runtime-state)
+15. [🍪 Cookies](#15--cookies)
+16. [📊 Severity Level Reference](#16--severity-level-reference)
 
 ---
 
@@ -111,6 +112,41 @@ Cowork is Claude Desktop's agentic mode. These checks examine settings that cont
   - 🤖 **AI enablement**: Web search significantly expands Claude's capabilities, allowing it to retrieve current information, check documentation, and research topics. Understanding its status helps assess the scope of AI data flows.
 - **Severity**: ⚠️ `WARN` — Autonomous internet access is a significant capability expansion that should be intentionally configured.
 - **Recommendation**: Disable if the organization requires AI tools to operate without external internet access. If enabled, ensure network monitoring covers Claude's outbound traffic.
+
+---
+
+### 🌍 Allow All Browser Actions (allowAllBrowserActions)
+
+- **What**: Checks whether `preferences.allowAllBrowserActions` is `true`. When enabled, Claude can browse and interact with any website in Chrome without asking for user approval per action.
+- **Why it matters**:
+  - 🔴 **Risk**: With this enabled, Claude can navigate to arbitrary URLs, fill forms, click buttons, and execute JavaScript in the browser without per-action user consent. This expands the attack surface to include any website Claude can reach — a compromised or prompt-injected session could interact with sensitive web applications (banking, admin panels, internal tools) without the user being prompted.
+  - 📜 **Compliance**: Unrestricted browser automation may violate acceptable use policies, especially in environments where web access is governed. Autonomous interactions with third-party websites can create unintended data sharing or contractual exposure.
+  - 🤖 **AI enablement**: This setting is designed for power users who want seamless browser automation without constant approval prompts. It is a convenience/security trade-off.
+- **Severity**: ⚠️ `WARN` — Unrestricted browser actions represent a significant capability expansion.
+- **Recommendation**: Disable unless the user specifically needs autonomous browser interaction. When enabled, ensure network-level controls (proxy, DNS filtering) limit reachable websites. Review the Chrome Control extension's allowed actions.
+
+---
+
+### 🌐 Egress Allowed Domains (egressAllowedDomains)
+
+- **What**: Reads `egressAllowedDomains` from `local_*.json` session files. This field controls which domains the Cowork VM can reach over the network. A value of `["*"]` means unrestricted egress; a specific domain list means traffic is restricted to those domains only.
+- **Why it matters**:
+  - 🔴 **Risk**: When set to `["*"]`, the Cowork sandbox has unrestricted network egress — it can connect to any domain on the internet. This means autonomous code execution inside the VM can exfiltrate data to arbitrary endpoints, download malicious payloads, or interact with unauthorized services. A restricted domain list is the primary network boundary control for the Cowork VM.
+  - 📜 **Compliance**: Network segmentation and egress filtering are fundamental security controls (CIS, NIST 800-53 SC-7). Unrestricted egress from an AI agent's sandbox violates these controls.
+  - 🤖 **AI enablement**: Egress domains define what external resources are available to Cowork sessions. Development workflows may need access to package registries (npmjs.org, pypi.org), while more restricted sessions should be limited to specific domains.
+- **Severity**: ⚠️ `WARN` if `["*"]` (unrestricted), ℹ️ `INFO` if restricted to specific domains.
+- **Recommendation**: If egress is unrestricted (`["*"]`), investigate whether this is intentional. Work with the organization to define an appropriate domain allowlist. For restricted sessions, review the domain list to ensure only necessary domains are included.
+
+---
+
+### 🔇 Disabled MCP Tools (enabledMcpTools)
+
+- **What**: Reads `enabledMcpTools` from `local_*.json` session files and identifies tools explicitly set to `false` (disabled). Reports the total count and specifically calls out dangerous tools that have been disabled (e.g., `write_file`, `edit_file`, `execute_javascript`, `run_command`).
+- **Why it matters**:
+  - 🔍 **Visibility**: Disabled MCP tools show that the user or system has intentionally restricted certain capabilities. This is a positive security signal — it means dangerous tools have been turned off. However, the list also reveals what tools are available (everything not in the disabled list is implicitly enabled).
+  - 🤖 **AI enablement**: Users can fine-tune which MCP tools are active per session. The disabled list reflects conscious security decisions about tool access.
+- **Severity**: ℹ️ `INFO` — Disabling tools is a positive action, but the inventory is useful for understanding the security posture.
+- **Recommendation**: Review the disabled tools list to confirm dangerous tools are disabled as expected. Verify that no critical restrictions have been removed.
 
 ---
 
@@ -270,7 +306,36 @@ Plugins extend Claude Cowork's capabilities. They come in three categories: inst
 
 ---
 
-## 8. 🌐 Connectors
+## 8. 🪝 Plugin Hooks
+
+**Source files:** `hooks/hooks.json` inside plugin directories (cowork cached plugins, CC marketplace plugins, remote plugins)
+
+Plugin hooks are shell commands that plugins register to run at specific lifecycle events during a Claude session. They execute automatically without user interaction.
+
+---
+
+### ⚠️ Plugin Hook Executing Commands
+
+- **What**: Scans for `hooks/hooks.json` files inside plugin directories across 6 glob patterns (cowork cached plugins, CC marketplace plugins, remote plugins, and session-local copies). For each hooks file found, CLAUDIT extracts the hook events (`Stop`, `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `SessionStart`, etc.) and the shell commands they execute. Results are deduplicated by plugin name, event, and command.
+- **Why it matters**:
+  - 🔴 **Risk**: Plugin hooks are an arbitrary command execution channel. A hook registered on `PreToolUse` or `PostToolUse` runs a shell command **on every single tool call** — potentially hundreds of times per session. A hook on `Stop` runs when the session ends, and `UserPromptSubmit` runs on every user message. A malicious or compromised plugin could use hooks to:
+    - **Exfiltrate data**: A `Stop` hook could `curl` session contents to an external server
+    - **Modify behavior**: A `PreToolUse` hook could alter tool inputs or inject instructions
+    - **Persist access**: Hooks run with the user's full permissions and can write files, install software, or modify system configuration
+  - 📜 **Compliance**: Hooks are effectively background code execution triggered by AI agent activity. They should be inventoried and reviewed as part of software approval processes. Many organizations require visibility into all code execution paths.
+  - 🤖 **AI enablement**: Hooks are a legitimate plugin capability for observability (logging, notifications), guardrails (security checks before tool use), and workflow automation (Slack notifications on task completion). The audit ensures visibility into what hooks are active.
+- **Severity**: ⚠️ `WARN` — Plugin hooks represent a command execution channel that should be reviewed.
+- **Recommendation**: Review each hook's command to understand what it does. Pay special attention to hooks that:
+  - Make network calls (curl, wget, python scripts with HTTP)
+  - Run on high-frequency events (PreToolUse, PostToolUse)
+  - Reference external paths outside `${CLAUDE_PLUGIN_ROOT}`
+  - Execute arbitrary interpreters (python3, node, bash) with complex scripts
+
+  Remove or disable plugins with hooks that are not understood or not needed.
+
+---
+
+## 9. 🌐 Connectors
 
 **Source files:** `local_*.json` (session files) → `remoteMcpServersConfig`, `.mcp.json` (from remote plugins), extensions, MCP servers
 
@@ -300,7 +365,7 @@ Connectors represent all the external services and integrations that Claude can 
 
 ---
 
-## 9. 🎯 Skills
+## 10. 🎯 Skills
 
 **Source paths:** 9 different filesystem locations (see Architecture section)
 
@@ -341,7 +406,7 @@ Skills are SKILL.md files that define reusable prompts and instructions for Clau
 
 ---
 
-## 10. ⏰ Scheduled Tasks
+## 11. ⏰ Scheduled Tasks
 
 **Source file:** `scheduled-tasks.json` (per session)
 
@@ -371,7 +436,7 @@ Scheduled tasks are cron-scheduled autonomous Claude sessions. Each task has a c
 
 ---
 
-## 11. ⚙️ App Config (config.json)
+## 12. ⚙️ App Config (config.json)
 
 **Source file:** `~/Library/Application Support/Claude/config.json`
 
@@ -401,7 +466,7 @@ The app config contains application-level settings including OAuth tokens, netwo
 
 ---
 
-## 12. 💻 Claude Code Settings
+## 13. 💻 Claude Code Settings
 
 **Source file:** `~/.claude/settings.json`
 
@@ -421,7 +486,7 @@ Claude Code is the CLI-based Claude interface. Its settings file contains permis
 
 ---
 
-## 13. 🏃 Runtime State
+## 14. 🏃 Runtime State
 
 **Source:** System commands (`pgrep`, `pmset`, `crontab`, filesystem)
 
@@ -488,7 +553,7 @@ Runtime checks examine the live state of the system to detect Claude-related pro
 
 ---
 
-## 14. 🍪 Cookies
+## 15. 🍪 Cookies
 
 **Source files:** `~/Library/Application Support/Claude/Cookies`, `~/Library/Application Support/Claude/Cookies-journal`
 
@@ -507,7 +572,7 @@ Claude Desktop (as an Electron app) maintains browser-like cookie storage.
 
 ---
 
-## 15. 📊 Severity Level Reference
+## 16. 📊 Severity Level Reference
 
 CLAUDIT uses five severity levels. Here is what each means and when it is applied:
 
@@ -531,16 +596,19 @@ Here is a complete catalog of every `add_finding` call in CLAUDIT, organized by 
 | 2 | Cowork Settings | Scheduled tasks ENABLED | `preferences.coworkScheduledTasksEnabled == true` |
 | 3 | Cowork Settings | Code Desktop scheduled tasks ENABLED | `preferences.ccdScheduledTasksEnabled == true` |
 | 4 | Cowork Settings | Web search ENABLED | `preferences.coworkWebSearchEnabled == true` |
-| 5 | Security | Unencrypted OAuth token in plaintext config | `oauth:tokenCache` key present and non-empty in `config.json` |
-| 6 | Security | Extension allowlist DISABLED | Any `dxt:allowlistEnabled` key set to `"false"` in `config.json` |
-| 7 | Security | Extension blocklist is empty | `extensions-blocklist.json` exists but has 0 entries |
-| 8 | Extensions | Unsigned extension | Extension with `signatureInfo.status == "unsigned"` |
-| 9 | Extensions | Extension has dangerous tools | Extension declares `execute_javascript`, `write_file`, `edit_file`, `run_command`, or `execute_sql` |
-| 10 | Scheduled Tasks | Active scheduled task | Any task in `scheduled-tasks.json` with `enabled == true` |
-| 11 | Runtime | Sleep prevention assertion by Claude/Electron | `pmset -g assertions` output contains "Claude" or "Electron" |
-| 12 | Runtime | Claude-related crontab entry | User's `crontab -l` output contains "claude" (case-insensitive) |
-| 13 | Runtime | Claude LaunchAgent(s) found | Plist file in `~/Library/LaunchAgents/` containing "claude" in filename |
-| 14 | Runtime | Debug directory is large | `~/Library/Application Support/Claude/debug/` exceeds 100 MB |
+| 5 | Cowork Settings | Allow all browser actions ENABLED | `preferences.allowAllBrowserActions == true` |
+| 6 | Security | Cowork VM egress is UNRESTRICTED | `egressAllowedDomains == ["*"]` in any `local_*.json` session file |
+| 7 | Security | Plugin hooks executing commands | 1 or more `hooks/hooks.json` files found with command-type hooks |
+| 8 | Security | Unencrypted OAuth token in plaintext config | `oauth:tokenCache` key present and non-empty in `config.json` |
+| 9 | Security | Extension allowlist DISABLED | Any `dxt:allowlistEnabled` key set to `"false"` in `config.json` |
+| 10 | Security | Extension blocklist is empty | `extensions-blocklist.json` exists but has 0 entries |
+| 11 | Extensions | Unsigned extension | Extension with `signatureInfo.status == "unsigned"` |
+| 12 | Extensions | Extension has dangerous tools | Extension declares `execute_javascript`, `write_file`, `edit_file`, `run_command`, or `execute_sql` |
+| 13 | Scheduled Tasks | Active scheduled task | Any task in `scheduled-tasks.json` with `enabled == true` |
+| 14 | Runtime | Sleep prevention assertion by Claude/Electron | `pmset -g assertions` output contains "Claude" or "Electron" |
+| 15 | Runtime | Claude-related crontab entry | User's `crontab -l` output contains "claude" (case-insensitive) |
+| 16 | Runtime | Claude LaunchAgent(s) found | Plist file in `~/Library/LaunchAgents/` containing "claude" in filename |
+| 17 | Runtime | Debug directory is large | `~/Library/Application Support/Claude/debug/` exceeds 100 MB |
 
 ### 🔍 REVIEW Findings
 
@@ -552,9 +620,11 @@ Here is a complete catalog of every `add_finding` call in CLAUDIT, organized by 
 
 | # | Section | Finding | Trigger |
 |---|---------|---------|---------|
-| 1 | Connectors | Web connectors authenticated | 1 or more web connectors found with active OAuth connections |
-| 2 | Claude Code | Permissions granted | `permissions.allow` array is non-empty in `~/.claude/settings.json` |
-| 3 | Runtime | Claude is running | `pgrep -fl Claude` returns results |
+| 1 | Cowork Settings | Cowork VM egress restricted to specific domains | `egressAllowedDomains` is a non-`["*"]` domain list |
+| 2 | Cowork Settings | MCP tool(s) explicitly disabled | `enabledMcpTools` contains entries set to `false` |
+| 3 | Connectors | Web connectors authenticated | 1 or more web connectors found with active OAuth connections |
+| 4 | Claude Code | Permissions granted | `permissions.allow` array is non-empty in `~/.claude/settings.json` |
+| 5 | Runtime | Claude is running | `pgrep -fl Claude` returns results |
 
 ---
 
@@ -565,15 +635,17 @@ The following data is collected and displayed in the report but does **not** gen
 | Section | Data | Purpose |
 |---------|------|---------|
 | Desktop Settings | menuBarEnabled, sidebarMode, quickEntryShortcut | UX configuration context |
-| Cowork Settings | Enabled plugins, extra marketplaces, network mode | Plugin ecosystem inventory |
+| Cowork Settings | Enabled plugins, extra marketplaces, network mode, egress domain list (when restricted) | Plugin ecosystem and network inventory |
 | MCP Servers | Full server table (name, command, args, env vars) | Tool execution inventory |
 | Extensions | Full extension table (name, version, author, tools) | Extension inventory |
 | Extension Settings | Allowed directories per extension | Filesystem access scope |
 | Plugins | Installed plugins, cached plugins, marketplace availability | Plugin inventory |
+| Plugin Hooks | Full hook table (plugin, event, command) | Hook execution inventory |
 | Connectors | Desktop connectors, not-connected connectors | Integration inventory |
 | Skills | User skills, plugin skills (name, description, path) | Behavior/prompt inventory |
 | Scheduled Tasks | Disabled tasks | Historical workflow inventory |
 | App Config | Network mode, device ID (ant-did) | Configuration context |
+| Disabled MCP Tools | Per-session disabled tool list with dangerous tool callout | Tool restriction inventory |
 | Cookies | Cookie file presence | Artifact inventory |
 
 ---
@@ -590,10 +662,13 @@ CLAUDIT also builds a **Recommendations** list at the end of the report. Recomme
 6. 🔑 OAuth token is stored in plaintext
 7. 🔓 Extension allowlist is disabled
 8. 🌐 Web search is enabled
-9. 📡 Remote plugins are deployed
-10. 📦 Cached (not installed) plugins exist
-11. 🔐 Web connectors are authenticated
+9. 🌍 Allow all browser actions is enabled
+10. 🚪 Cowork VM network egress is unrestricted
+11. 🪝 Plugin hooks execute commands on lifecycle events
+12. 📡 Remote plugins are deployed
+13. 📦 Cached (not installed) plugins exist
+14. 🔐 Web connectors are authenticated
 
 ---
 
-*This document was generated for CLAUDIT-SEC v2.2.0. Last updated: 2026-03-18.*
+*This document was generated for CLAUDIT-SEC v2.2.0. Last updated: 2026-03-19.*

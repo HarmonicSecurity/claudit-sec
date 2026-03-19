@@ -41,6 +41,14 @@ MARKETPLACE_AVAILABLE=()
 # Connectors
 CONN_NAMES=() ; CONN_CATS=() ; CONN_TOOLS=() ; CONN_TAGS=()
 
+# Egress & Session Security
+EGRESS_DOMAINS=""            # most-permissive egress policy found across sessions
+EGRESS_UNRESTRICTED=false    # true if any session has ["*"]
+# Disabled MCP tools (tool keys explicitly set to false)
+DISABLED_MCP_TOOLS=()
+# Plugin hooks
+HOOK_PLUGINS=() ; HOOK_EVENTS=() ; HOOK_CMDS=()
+
 # Skills
 SK_NAMES=() ; SK_DESCS=() ; SK_SRCS=() ; SK_PLUGINS=() ; SK_PATHS=()
 
@@ -296,6 +304,7 @@ collect_desktop_settings() { # claude_dir
     COWORK_PREFS[coworkScheduledTasksEnabled]=$(printf '%s' "$prefs" | jq -r '.coworkScheduledTasksEnabled // false')
     COWORK_PREFS[ccdScheduledTasksEnabled]=$(printf '%s' "$prefs" | jq -r '.ccdScheduledTasksEnabled // false')
     COWORK_PREFS[coworkWebSearchEnabled]=$(printf '%s' "$prefs" | jq -r '.coworkWebSearchEnabled // false')
+    COWORK_PREFS[allowAllBrowserActions]=$(printf '%s' "$prefs" | jq -r '.allowAllBrowserActions // false')
 
     [[ "${COWORK_PREFS[coworkScheduledTasksEnabled]}" == "true" ]] && \
         add_finding "WARN" "Cowork Settings" "Scheduled tasks ENABLED — autonomous task execution active" "coworkScheduledTasksEnabled=true"
@@ -303,6 +312,8 @@ collect_desktop_settings() { # claude_dir
         add_finding "WARN" "Cowork Settings" "Code Desktop scheduled tasks ENABLED" "ccdScheduledTasksEnabled=true"
     [[ "${COWORK_PREFS[coworkWebSearchEnabled]}" == "true" ]] && \
         add_finding "WARN" "Cowork Settings" "Web search ENABLED — autonomous internet access" "coworkWebSearchEnabled=true"
+    [[ "${COWORK_PREFS[allowAllBrowserActions]}" == "true" ]] && \
+        add_finding "WARN" "Cowork Settings" "Allow all browser actions ENABLED — Claude can browse any website without asking" "allowAllBrowserActions=true"
 
     # MCP Servers
     local mcp_json
@@ -342,7 +353,7 @@ collect_cowork_settings() { # uses SESSION_DIRS
         mp_keys=$(printf '%s' "$data" | jq -r '.extraKnownMarketplaces // {} | keys[]' 2>/dev/null) || true
         while IFS= read -r mk; do
             [[ -z "$mk" ]] && continue
-            COWORK_MARKETPLACES_JSON["$mk"]=$(printf '%s' "$data" | jq -c --arg k "$mk" '.extraKnownMarketplaces[$k]')
+            COWORK_MARKETPLACES_JSON[$mk]=$(printf '%s' "$data" | jq -c --arg k "$mk" '.extraKnownMarketplaces[$k]')
         done <<< "$mp_keys"
     done
 }
@@ -368,7 +379,7 @@ collect_app_config() { # claude_dir
     has_oauth=$(printf '%s' "$data" | jq -r 'has("oauth:tokenCache") and (.["oauth:tokenCache"] | length > 0)')
     if [[ "$has_oauth" == "true" ]]; then
         add_finding "WARN" "Security" "Unencrypted OAuth token in plaintext config" "oauth:tokenCache present in config.json"
-        APP_CONFIG["oauth:tokenCache"]="[REDACTED]"
+        APP_CONFIG[oauth:tokenCache]="[REDACTED]"
     fi
 
     local dxt_keys
@@ -377,14 +388,14 @@ collect_app_config() { # claude_dir
         [[ -z "$dk" ]] && continue
         local val
         val=$(printf '%s' "$data" | jq -r --arg k "$dk" '.[$k]')
-        APP_CONFIG["$dk"]="$val"
+        APP_CONFIG[$dk]="$val"
         [[ "$val" == "false" ]] && add_finding "WARN" "Security" "Extension allowlist DISABLED: $dk" "Any extension can be installed without approval"
     done <<< "$dxt_keys"
 
     local ant_did
     ant_did=$(printf '%s' "$data" | jq -r '.["ant-did"] // ""')
     if [[ -n "$ant_did" ]]; then
-        RUNTIME_INFO[ant_did]="$ant_did"; APP_CONFIG["ant-did"]="$ant_did"
+        RUNTIME_INFO[ant_did]="$ant_did"; APP_CONFIG[ant-did]="$ant_did"
     fi
 }
 
@@ -460,7 +471,7 @@ collect_extension_settings() { # claude_dir
         [[ -n "$JSON_ERROR" || -z "$data" ]] && continue
         local ext_name
         ext_name=$(basename "$sf" .json)
-        EXT_SETTINGS_JSON["$ext_name"]="$data"
+        EXT_SETTINGS_JSON[$ext_name]="$data"
     done
 }
 
@@ -514,7 +525,7 @@ collect_plugins() { # uses SESSION_DIRS
                     PLG_SCOPES+=("$pscope"); PLG_AUTHORS+=("$pauthor"); PLG_DESCS+=("$pdesc")
                     PLG_MPS+=("$mp_part"); PLG_INSTALLED_ATS+=("$pinst_at"); PLG_INSTALLED_BYS+=("")
                     PLG_IDS+=(""); PLG_SKILL_COUNTS+=("$sk_count")
-                    installed_names["$name_part"]=1
+                    installed_names[$name_part]=1
                 done
             done <<< "$pkeys"
         fi
@@ -553,7 +564,7 @@ collect_plugins() { # uses SESSION_DIRS
                 PLG_SCOPES+=(""); PLG_AUTHORS+=("$rp_author"); PLG_DESCS+=("$rp_desc")
                 PLG_MPS+=("$rp_mp"); PLG_INSTALLED_ATS+=(""); PLG_INSTALLED_BYS+=("$rp_by")
                 PLG_IDS+=("$rp_id"); PLG_SKILL_COUNTS+=("$rp_sk")
-                remote_names["$rp_name"]=1
+                remote_names[$rp_name]=1
                 add_finding "REVIEW" "Plugins" "Remote plugin: $rp_name (v$rp_ver) deployed by $rp_by" "id=$rp_id, marketplace=$rp_mp"
             done
         fi
@@ -621,9 +632,72 @@ collect_plugins() { # uses SESSION_DIRS
     local -A mp_seen; local mp_dedup=()
     local mp_item
     for mp_item in "${MARKETPLACE_AVAILABLE[@]}"; do
-        [[ -z "${mp_seen[$mp_item]:-}" ]] && { mp_dedup+=("$mp_item"); mp_seen["$mp_item"]=1; }
+        [[ -z "${mp_seen[$mp_item]:-}" ]] && { mp_dedup+=("$mp_item"); mp_seen[$mp_item]=1; }
     done
     MARKETPLACE_AVAILABLE=("${mp_dedup[@]+"${mp_dedup[@]}"}")
+}
+
+collect_plugin_hooks() { # uses SESSION_DIRS, home
+    local home="$1"
+    local -A seen_hooks  # "plugin|event|cmd" -> 1
+
+    # Scan paths: cowork cached plugins, CC marketplace plugins, remote plugins
+    local hook_globs=(
+        "cowork_plugins/cache/*/*/hooks/hooks.json"
+        "local_*/.claude/plugins/marketplaces/*/plugins/*/hooks/hooks.json"
+        "local_*/.claude/plugins/marketplaces/*/external_plugins/*/hooks/hooks.json"
+        "remote_cowork_plugins/*/hooks/hooks.json"
+    )
+    local cc_hook_globs=(
+        "$home/.claude/plugins/marketplaces/*/plugins/*/hooks/hooks.json"
+        "$home/.claude/plugins/marketplaces/*/external_plugins/*/hooks/hooks.json"
+    )
+
+    local _hp all_hook_files=()
+    local sess_dir
+    for sess_dir in "${SESSION_DIRS[@]}"; do
+        local glob_pat
+        for glob_pat in "${hook_globs[@]}"; do
+            for _hp in "$sess_dir"/$~glob_pat; do
+                [[ -f "$_hp" ]] && all_hook_files+=("$_hp")
+            done
+        done
+    done
+    local glob_pat
+    for glob_pat in "${cc_hook_globs[@]}"; do
+        for _hp in $~glob_pat; do
+            [[ -f "$_hp" ]] && all_hook_files+=("$_hp")
+        done
+    done
+
+    for _hp in "${all_hook_files[@]}"; do
+        local hdata
+        hdata=$(safe_read_json "$_hp") || true
+        [[ -n "$JSON_ERROR" || -z "$hdata" ]] && continue
+
+        # Derive plugin name from path
+        local pname
+        pname=$(printf '%s' "$_hp" | sed -E 's|.*/plugins/([^/]+)/hooks/.*|\1|; s|.*/cache/[^/]+/([^/]+)/[^/]+/hooks/.*|\1|; s|.*/remote_cowork_plugins/([^/]+)/hooks/.*|\1|')
+        [[ "$pname" == "$_hp" ]] && pname="unknown"
+
+        local events
+        events=$(printf '%s' "$hdata" | jq -r '.hooks // {} | keys[]' 2>/dev/null) || true
+        while IFS= read -r ev; do
+            [[ -z "$ev" ]] && continue
+            local cmds
+            cmds=$(printf '%s' "$hdata" | jq -r --arg e "$ev" '.hooks[$e][]?.hooks[]? | select(.type == "command") | .command // empty' 2>/dev/null) || true
+            while IFS= read -r cmd; do
+                [[ -z "$cmd" ]] && continue
+                local dedup_key="$pname|$ev|$cmd"
+                [[ -n "${seen_hooks[$dedup_key]:-}" ]] && continue
+                seen_hooks[$dedup_key]=1
+                HOOK_PLUGINS+=("$pname"); HOOK_EVENTS+=("$ev"); HOOK_CMDS+=("$cmd")
+            done <<< "$cmds"
+        done <<< "$events"
+    done
+
+    ((${#HOOK_PLUGINS[@]} > 0)) && add_finding "WARN" "Security" "${#HOOK_PLUGINS[@]} plugin hook(s) found executing commands on lifecycle events" \
+        "Plugins: $(printf '%s\n' "${HOOK_PLUGINS[@]}" | sort -u | tr '\n' ',' | sed 's/,$//')"
 }
 
 collect_connectors() { # uses SESSION_DIRS, EXT_*, MCP_*
@@ -636,6 +710,26 @@ collect_connectors() { # uses SESSION_DIRS, EXT_*, MCP_*
             local data
             data=$(safe_read_json "$entry") || true
             [[ -n "$JSON_ERROR" || -z "$data" ]] && continue
+
+            # Egress policy (most-permissive wins)
+            local egress
+            egress=$(printf '%s' "$data" | jq -r '.egressAllowedDomains // empty | if type == "array" then if . == ["*"] then "*" elif length > 0 then join(", ") else empty end else . end' 2>/dev/null) || true
+            if [[ "$egress" == "*" ]]; then
+                EGRESS_UNRESTRICTED=true; EGRESS_DOMAINS="*"
+            elif [[ -n "$egress" && "$EGRESS_UNRESTRICTED" != "true" ]]; then
+                EGRESS_DOMAINS="$egress"
+            fi
+
+            # Disabled MCP tools
+            local disabled
+            disabled=$(printf '%s' "$data" | jq -r '.enabledMcpTools // {} | to_entries[] | select(.value == false) | .key' 2>/dev/null) || true
+            while IFS= read -r dk; do
+                [[ -z "$dk" ]] && continue
+                local already=false; local di
+                for ((di=0; di<${#DISABLED_MCP_TOOLS[@]}; di++)); do [[ "${DISABLED_MCP_TOOLS[$di]}" == "$dk" ]] && { already=true; break; }; done
+                [[ "$already" == "false" ]] && DISABLED_MCP_TOOLS+=("$dk")
+            done <<< "$disabled"
+
             local ts rmc_len
             ts=$(printf '%s' "$data" | jq -r '.lastActivityAt // 0')
             rmc_len=$(printf '%s' "$data" | jq '.remoteMcpServersConfig // [] | length')
@@ -647,8 +741,8 @@ collect_connectors() { # uses SESSION_DIRS, EXT_*, MCP_*
                 [[ -z "$srv_name" ]] && continue
                 local key="${(L)srv_name}"  # lowercase
                 if [[ -z "${best_ts[$key]:-}" ]] || ((ts > best_ts[$key])); then
-                    best_ts["$key"]="$ts"
-                    best_conn_json["$key"]="$srv_name|$(printf '%s' "$data" | jq -r ".remoteMcpServersConfig[$si].tools // [] | length")"
+                    best_ts[$key]="$ts"
+                    best_conn_json[$key]="$srv_name|$(printf '%s' "$data" | jq -r ".remoteMcpServersConfig[$si].tools // [] | length")"
                 fi
             done
         done
@@ -662,7 +756,7 @@ collect_connectors() { # uses SESSION_DIRS, EXT_*, MCP_*
             local cname="${val%%|*}" ctc="${val#*|}"
             CONN_NAMES+=("$cname"); CONN_CATS+=("web"); CONN_TOOLS+=("$ctc"); CONN_TAGS+=("")
             local norm; norm=$(printf '%s' "$cname" | tr '[:upper:]' '[:lower:]' | tr ' _' '--' | tr -cd 'a-z0-9-')
-            [[ -n "$norm" ]] && seen_web_norm["$norm"]=1
+            [[ -n "$norm" ]] && seen_web_norm[$norm]=1
         done < <(printf '%s\n' "${(k)best_conn_json[@]}" | sort)
     fi
 
@@ -690,7 +784,7 @@ collect_connectors() { # uses SESSION_DIRS, EXT_*, MCP_*
             while IFS= read -r sn; do
                 [[ -z "$sn" ]] && continue
                 local norm; norm=$(printf '%s' "$sn" | tr '[:upper:]' '[:lower:]' | tr ' _' '--' | tr -cd 'a-z0-9-')
-                [[ -z "${seen_web_norm[$norm]:-}" ]] && not_connected["$norm"]="$sn"
+                [[ -z "${seen_web_norm[$norm]:-}" ]] && not_connected[$norm]="$sn"
             done <<< "$srv_names"
         done
     done
@@ -719,6 +813,24 @@ collect_connectors() { # uses SESSION_DIRS, EXT_*, MCP_*
         [[ "${CONN_CATS[$i]}" == "web" ]] && { [[ -n "$web_names" ]] && web_names+=", "; web_names+="${CONN_NAMES[$i]}"; }
     done
     ((web_count > 0)) && add_finding "INFO" "Connectors" "$web_count web connector(s) authenticated: $web_names"
+
+    # Egress findings
+    if [[ "$EGRESS_UNRESTRICTED" == "true" ]]; then
+        add_finding "WARN" "Security" "Cowork VM egress is UNRESTRICTED — all domains allowed" "egressAllowedDomains=[\"*\"]"
+    elif [[ -n "$EGRESS_DOMAINS" ]]; then
+        add_finding "INFO" "Cowork Settings" "Cowork VM egress restricted to specific domains" "egressAllowedDomains: $EGRESS_DOMAINS"
+    fi
+
+    # Disabled MCP tools findings
+    local disabled_dangerous=""
+    for ((i=0; i<${#DISABLED_MCP_TOOLS[@]}; i++)); do
+        local tk="${DISABLED_MCP_TOOLS[$i]}"
+        if [[ "$tk" == *execute_javascript* || "$tk" == *write_file* || "$tk" == *edit_file* || "$tk" == *run_command* ]]; then
+            [[ -n "$disabled_dangerous" ]] && disabled_dangerous+=", "
+            disabled_dangerous+="$tk"
+        fi
+    done
+    ((${#DISABLED_MCP_TOOLS[@]} > 0)) && add_finding "INFO" "Cowork Settings" "${#DISABLED_MCP_TOOLS[@]} MCP tool(s) explicitly disabled" "${disabled_dangerous:+Includes dangerous tools: $disabled_dangerous}"
 }
 
 collect_skills() { # uses SESSION_DIRS, home
@@ -1046,7 +1158,7 @@ collect_cookies() { # claude_dir
     for label in Cookies Cookies-journal; do
         _path="$claude_dir/$label"
         [[ -e "$_path" ]] || continue
-        COOKIES_INFO["${label}_present"]="true"
+        COOKIES_INFO[${label}_present]="true"
     done
 }
 
@@ -1085,6 +1197,14 @@ build_recommendations() {
 
     [[ "${COWORK_PREFS[coworkWebSearchEnabled]:-false}" == "true" ]] && \
         RECOMMENDATIONS+=("Cowork web search enabled — autonomous internet access")
+    [[ "${COWORK_PREFS[allowAllBrowserActions]:-false}" == "true" ]] && \
+        RECOMMENDATIONS+=("Allow all browser actions enabled — Claude can browse any website without asking")
+
+    [[ "$EGRESS_UNRESTRICTED" == "true" ]] && \
+        RECOMMENDATIONS+=("Cowork VM network egress is unrestricted — all domains reachable")
+
+    ((${#HOOK_PLUGINS[@]} > 0)) && \
+        RECOMMENDATIONS+=("${#HOOK_PLUGINS[@]} plugin hook(s) execute commands on lifecycle events — review for data exfiltration risk")
 
     local remote_names=""
     for ((i=0; i<${#PLG_SRCS[@]}; i++)); do
@@ -1211,13 +1331,22 @@ BANNER
     fi
 
     # Cowork Settings
-    local cst="${COWORK_PREFS[coworkScheduledTasksEnabled]:-false}" ccd="${COWORK_PREFS[ccdScheduledTasksEnabled]:-false}" cws="${COWORK_PREFS[coworkWebSearchEnabled]:-false}"
+    local cst="${COWORK_PREFS[coworkScheduledTasksEnabled]:-false}" ccd="${COWORK_PREFS[ccdScheduledTasksEnabled]:-false}" cws="${COWORK_PREFS[coworkWebSearchEnabled]:-false}" aba="${COWORK_PREFS[allowAllBrowserActions]:-false}"
     if [[ "$quiet" != "true" ]]; then
         _section_hdr "COWORK SETTINGS"
         printf '  scheduledTasksEnabled:         %s' "$(_on_off "$cst")"; [[ "$cst" == "true" ]] && printf '   ⚠ Autonomous task execution'; echo
         printf '  ccdScheduledTasksEnabled:      %s' "$(_on_off "$ccd")"; [[ "$ccd" == "true" ]] && printf '   ⚠ Code Desktop scheduled tasks'; echo
         printf '  webSearchEnabled:              %s' "$(_on_off "$cws")"; [[ "$cws" == "true" ]] && printf '   ⚠ Autonomous internet access'; echo
+        printf '  allowAllBrowserActions:        %s' "$(_on_off "$aba")"; [[ "$aba" == "true" ]] && printf '   ⚠ Browse any website without asking'; echo
         printf '  networkMode:                   %s\n' "${COWORK_NETWORK_MODE:-$(_dim "-")}"
+        if [[ "$EGRESS_UNRESTRICTED" == "true" ]]; then
+            printf '  egressAllowedDomains:          %s   ⚠ All domains reachable\n' "$(_on_off true)"
+        elif [[ -n "$EGRESS_DOMAINS" ]]; then
+            printf '  egressAllowedDomains:          %s\n' "$(_dim "restricted")"
+        else
+            printf '  egressAllowedDomains:          %s\n' "$(_dim "-")"
+        fi
+        ((${#DISABLED_MCP_TOOLS[@]}>0)) && printf '  Disabled MCP tools:            %d tool(s)\n' "${#DISABLED_MCP_TOOLS[@]}"
         ((${#COWORK_ENABLED_PLUGINS[@]}>0)) && printf '  Enabled plugins:               %s\n' "$(IFS=', '; echo "${COWORK_ENABLED_PLUGINS[*]}")"
         for mk in "${(k)COWORK_MARKETPLACES_JSON[@]}"; do
             local st sr; st=$(printf '%s' "${COWORK_MARKETPLACES_JSON[$mk]}" | jq -r '.source.source // "?"' 2>/dev/null)
@@ -1229,7 +1358,21 @@ BANNER
         [[ "$cst" == "true" ]] && wi+=("$(printf '  scheduledTasksEnabled:         %s   ⚠ Autonomous task execution' "$(_on_off "$cst")")")
         [[ "$ccd" == "true" ]] && wi+=("$(printf '  ccdScheduledTasksEnabled:      %s   ⚠ Code Desktop scheduled tasks' "$(_on_off "$ccd")")")
         [[ "$cws" == "true" ]] && wi+=("$(printf '  webSearchEnabled:              %s   ⚠ Autonomous internet access' "$(_on_off "$cws")")")
+        [[ "$aba" == "true" ]] && wi+=("$(printf '  allowAllBrowserActions:        %s   ⚠ Browse any website without asking' "$(_on_off "$aba")")")
+        [[ "$EGRESS_UNRESTRICTED" == "true" ]] && wi+=("$(printf '  egressAllowedDomains:          %s   ⚠ All domains reachable' "$(_on_off true)")")
         if ((${#wi[@]}>0)); then _section_hdr "COWORK SETTINGS"; for w in "${wi[@]}"; do echo "$w"; done; echo; fi
+    fi
+
+    # Plugin Hooks
+    if [[ "$quiet" != "true" || ${#HOOK_PLUGINS[@]} -gt 0 ]]; then
+        if ((${#HOOK_PLUGINS[@]}>0)); then
+            _section_hdr "PLUGIN HOOKS"
+            local rows=""
+            for ((i=0;i<${#HOOK_PLUGINS[@]};i++)); do
+                [[ -n "$rows" ]] && rows+=$'\n'
+                rows+="$(truncate_str "${HOOK_PLUGINS[$i]}" 24)|$(truncate_str "${HOOK_EVENTS[$i]}" 18)|$(truncate_str "${HOOK_CMDS[$i]}" 48)"
+            done; ascii_table "Plugin|Event|Command" "$rows" "24|18|48"; echo
+        fi
     fi
 
     # MCP Servers
@@ -1315,7 +1458,7 @@ BANNER
                 prows+="$(truncate_str "${SK_NAMES[$idx]}" 24)|$(truncate_str "${SK_PLUGINS[$idx]:-unknown}" 22)|$(truncate_str "${SK_DESCS[$idx]}" 40)"
             done; ascii_table "Skill|Plugin|Description" "$prows" "24|22|40"
         elif ((${#psk_i[@]}>0)); then
-            local -A pns; for idx in "${psk_i[@]}"; do pns["${SK_PLUGINS[$idx]:-unknown}"]=1; done
+            local -A pns; for idx in "${psk_i[@]}"; do pns[${SK_PLUGINS[$idx]:-unknown}]=1; done
             echo "  Plugin skills: ${#psk_i[@]} across $(IFS=', '; echo "${(k)pns[*]}")"
         fi
         ((${#usk_i[@]}==0 && ${#psk_i[@]}==0)) && echo "  No skills found."; echo
@@ -1459,29 +1602,48 @@ HTMLEOF
     fi
 
     # Cowork Settings
-    local cst="${COWORK_PREFS[coworkScheduledTasksEnabled]:-false}" ccd="${COWORK_PREFS[ccdScheduledTasksEnabled]:-false}" cws="${COWORK_PREFS[coworkWebSearchEnabled]:-false}"
+    local cst="${COWORK_PREFS[coworkScheduledTasksEnabled]:-false}" ccd="${COWORK_PREFS[ccdScheduledTasksEnabled]:-false}" cws="${COWORK_PREFS[coworkWebSearchEnabled]:-false}" aba="${COWORK_PREFS[allowAllBrowserActions]:-false}"
     if [[ "$quiet" != "true" ]]; then
         echo '<details open><summary>Cowork Settings</summary><div class="detail-content">'
         for tuple in "coworkScheduledTasksEnabled|scheduledTasksEnabled|Autonomous task execution" \
                      "ccdScheduledTasksEnabled|ccdScheduledTasksEnabled|Code Desktop scheduled tasks" \
-                     "coworkWebSearchEnabled|webSearchEnabled|Autonomous internet access"; do
+                     "coworkWebSearchEnabled|webSearchEnabled|Autonomous internet access" \
+                     "allowAllBrowserActions|allowAllBrowserActions|Browse any website without asking"; do
             IFS='|' read -r key label wmsg <<< "$tuple"; local val="${COWORK_PREFS[$key]:-false}"
             printf '<div class="setting-row"><span class="setting-key">%s</span><span class="setting-val">%s</span>' "$(_h "$label")" "$(_on_off_html "$val")"
             [[ "$val" == "true" ]] && printf '<span class="setting-warn">&#9888; %s</span>' "$(_h "$wmsg")"; echo '</div>'
         done
         printf '<div class="setting-row"><span class="setting-key">networkMode</span><span class="setting-val">%s</span></div>\n' "$(_h "${COWORK_NETWORK_MODE:-"-"}")"
+        if [[ "$EGRESS_UNRESTRICTED" == "true" ]]; then
+            printf '<div class="setting-row"><span class="setting-key">egressAllowedDomains</span><span class="setting-val">%s</span><span class="setting-warn">&#9888; All domains reachable</span></div>\n' "$(_on_off_html true)"
+        elif [[ -n "$EGRESS_DOMAINS" ]]; then
+            printf '<div class="setting-row"><span class="setting-key">egressAllowedDomains</span><span class="setting-val">%s</span></div>\n' "$(_h "restricted")"
+        fi
+        ((${#DISABLED_MCP_TOOLS[@]}>0)) && printf '<div class="setting-row"><span class="setting-key">Disabled MCP tools</span><span class="setting-val">%d tool(s)</span></div>\n' "${#DISABLED_MCP_TOOLS[@]}"
         ((${#COWORK_ENABLED_PLUGINS[@]}>0)) && printf '<div class="setting-row"><span class="setting-key">Enabled plugins</span><span class="setting-val">%s</span></div>\n' "$(_h "$(IFS=', '; echo "${COWORK_ENABLED_PLUGINS[*]}")")"
         echo '</div></details>'
     else
-        if [[ "$cst" == "true" || "$ccd" == "true" || "$cws" == "true" ]]; then
+        if [[ "$cst" == "true" || "$ccd" == "true" || "$cws" == "true" || "$aba" == "true" || "$EGRESS_UNRESTRICTED" == "true" ]]; then
             echo '<details open><summary>Cowork Settings</summary><div class="detail-content">'
             for tuple in "coworkScheduledTasksEnabled|scheduledTasksEnabled|Autonomous task execution" \
                          "ccdScheduledTasksEnabled|ccdScheduledTasksEnabled|Code Desktop scheduled tasks" \
-                         "coworkWebSearchEnabled|webSearchEnabled|Autonomous internet access"; do
+                         "coworkWebSearchEnabled|webSearchEnabled|Autonomous internet access" \
+                         "allowAllBrowserActions|allowAllBrowserActions|Browse any website without asking"; do
                 IFS='|' read -r key label wmsg <<< "$tuple"
                 [[ "${COWORK_PREFS[$key]:-false}" == "true" ]] && printf '<div class="setting-row"><span class="setting-key">%s</span><span class="setting-val">%s</span><span class="setting-warn">&#9888; %s</span></div>\n' "$(_h "$label")" "$(_on_off_html true)" "$(_h "$wmsg")"
-            done; echo '</div></details>'
+            done
+            [[ "$EGRESS_UNRESTRICTED" == "true" ]] && printf '<div class="setting-row"><span class="setting-key">egressAllowedDomains</span><span class="setting-val">%s</span><span class="setting-warn">&#9888; All domains reachable</span></div>\n' "$(_on_off_html true)"
+            echo '</div></details>'
         fi
+    fi
+
+    # Plugin Hooks
+    if ((${#HOOK_PLUGINS[@]}>0)); then
+        echo '<details open><summary>Plugin Hooks</summary><div class="detail-content">'
+        echo '<table><tr><th>Plugin</th><th>Event</th><th>Command</th></tr>'
+        for ((i=0;i<${#HOOK_PLUGINS[@]};i++)); do
+            printf '<tr><td>%s</td><td>%s</td><td><code>%s</code></td></tr>\n' "$(_h "${HOOK_PLUGINS[$i]}")" "$(_h "${HOOK_EVENTS[$i]}")" "$(_h "${HOOK_CMDS[$i]}")"
+        done; echo '</table></div></details>'
     fi
 
     # MCP Servers
@@ -1559,7 +1721,7 @@ HTMLEOF
                 printf '<tr><td>%s</td><td>%s</td><td>%s</td></tr>\n' "$(_h "${SK_NAMES[$i]}")" "$(_h "${SK_PLUGINS[$i]:-unknown}")" "$(_h "${SK_DESCS[$i]:0:80}")"
             done; echo '</table>'
         elif ((n_psk>0)); then
-            local -A pns; for ((i=0;i<${#SK_SRCS[@]};i++)); do [[ "${SK_SRCS[$i]}" == "plugin" ]] && pns["${SK_PLUGINS[$i]:-unknown}"]=1; done
+            local -A pns; for ((i=0;i<${#SK_SRCS[@]};i++)); do [[ "${SK_SRCS[$i]}" == "plugin" ]] && pns[${SK_PLUGINS[$i]:-unknown}]=1; done
             printf '<p>Plugin skills: %d across %s</p>\n' "$n_psk" "$(_h "$(IFS=', '; echo "${(k)pns[*]}")")"; fi
         ((n_usk==0&&n_psk==0)) && echo '<p>No skills found.</p>'; echo '</div></details>'
     fi
@@ -1658,11 +1820,29 @@ render_json() {
     done; ext_j+="]"
 
     local dp_j="{\"keepAwakeEnabled\":${DESKTOP_PREFS[keepAwakeEnabled]:-false},\"menuBarEnabled\":${DESKTOP_PREFS[menuBarEnabled]:-false}}"
-    local cp_j="{\"coworkScheduledTasksEnabled\":${COWORK_PREFS[coworkScheduledTasksEnabled]:-false},\"ccdScheduledTasksEnabled\":${COWORK_PREFS[ccdScheduledTasksEnabled]:-false},\"coworkWebSearchEnabled\":${COWORK_PREFS[coworkWebSearchEnabled]:-false}}"
+    local cp_j="{\"coworkScheduledTasksEnabled\":${COWORK_PREFS[coworkScheduledTasksEnabled]:-false},\"ccdScheduledTasksEnabled\":${COWORK_PREFS[ccdScheduledTasksEnabled]:-false},\"coworkWebSearchEnabled\":${COWORK_PREFS[coworkWebSearchEnabled]:-false},\"allowAllBrowserActions\":${COWORK_PREFS[allowAllBrowserActions]:-false}}"
 
-    printf '{"timestamp":%s,"hostname":%s,"username":%s,"home_dir":%s,"findings":%s,"desktop_prefs":%s,"cowork_prefs":%s,"cowork_network_mode":%s,"mcp_servers":%s,"plugins":%s,"connectors":%s,"skills":%s,"scheduled_tasks":%s,"extensions":%s,"blocklist_entries":%d,"blocklist_status":%s,"claude_code_settings":%s,"warn_count":%d,"info_count":%d}' \
+    local egress_j
+    if [[ "$EGRESS_UNRESTRICTED" == "true" ]]; then egress_j='["*"]'
+    elif [[ -n "$EGRESS_DOMAINS" ]]; then
+        egress_j="["; local first=true; local _d
+        while IFS=', ' read -rA _dlist; do for _d in "${_dlist[@]}"; do
+            [[ -z "$_d" ]] && continue; [[ "$first" == "true" ]] && first=false || egress_j+=","
+            egress_j+="$(_jstr "$_d")"
+        done; done <<< "$EGRESS_DOMAINS"; egress_j+="]"
+    else egress_j="null"; fi
+
+    local dtool_j="["; for ((i=0;i<${#DISABLED_MCP_TOOLS[@]};i++)); do ((i>0)) && dtool_j+=","
+        dtool_j+="$(_jstr "${DISABLED_MCP_TOOLS[$i]}")"; done; dtool_j+="]"
+
+    local hook_j="["; for ((i=0;i<${#HOOK_PLUGINS[@]};i++)); do ((i>0)) && hook_j+=","
+        hook_j+="{\"plugin\":$(_jstr "${HOOK_PLUGINS[$i]}"),\"event\":$(_jstr "${HOOK_EVENTS[$i]}"),\"command\":$(_jstr "${HOOK_CMDS[$i]}")}"
+    done; hook_j+="]"
+
+    printf '{"timestamp":%s,"hostname":%s,"username":%s,"home_dir":%s,"findings":%s,"desktop_prefs":%s,"cowork_prefs":%s,"cowork_network_mode":%s,"egress_allowed_domains":%s,"disabled_mcp_tools":%s,"plugin_hooks":%s,"mcp_servers":%s,"plugins":%s,"connectors":%s,"skills":%s,"scheduled_tasks":%s,"extensions":%s,"blocklist_entries":%d,"blocklist_status":%s,"claude_code_settings":%s,"warn_count":%d,"info_count":%d}' \
         "$(_jstr "$TIMESTAMP")" "$(_jstr "$HOSTNAME_VAL")" "$(_jstr "$AUDIT_USER")" "$(_jstr "$HOME_DIR")" \
         "$findings_j" "$dp_j" "$cp_j" "$(_jstr "$COWORK_NETWORK_MODE")" \
+        "$egress_j" "$dtool_j" "$hook_j" \
         "$mcp_j" "$plg_j" "$conn_j" "$sk_j" "$st_j" "$ext_j" \
         "$BLOCKLIST_ENTRIES" "$(_jstr "$BLOCKLIST_STATUS")" "$CLAUDE_CODE_JSON" \
         "$WARN_COUNT" "$INFO_COUNT" | \
@@ -1682,6 +1862,8 @@ run_audit() {
     PLG_DESCS=(); PLG_MPS=(); PLG_INSTALLED_ATS=(); PLG_INSTALLED_BYS=()
     PLG_IDS=(); PLG_SKILL_COUNTS=(); MARKETPLACE_AVAILABLE=()
     CONN_NAMES=(); CONN_CATS=(); CONN_TOOLS=(); CONN_TAGS=()
+    EGRESS_DOMAINS=""; EGRESS_UNRESTRICTED=false; DISABLED_MCP_TOOLS=()
+    HOOK_PLUGINS=(); HOOK_EVENTS=(); HOOK_CMDS=()
     SK_NAMES=(); SK_DESCS=(); SK_SRCS=(); SK_PLUGINS=(); SK_PATHS=()
     ST_IDS=(); ST_CRONS=(); ST_CRON_ENG=(); ST_ENABLEDS=(); ST_FPATHS=()
     ST_CREATED=(); ST_SNAMES=(); ST_SDESCS=(); ST_PROMPTS=()
@@ -1702,6 +1884,7 @@ run_audit() {
     collect_extensions "$claude_dir"
     collect_extension_settings "$claude_dir"
     collect_plugins
+    collect_plugin_hooks "$home"
     collect_connectors
     collect_skills "$home"
     collect_scheduled_tasks

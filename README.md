@@ -21,16 +21,18 @@ CLAUDIT gives you that visibility in a single command.
 | Area | What's Checked |
 |------|---------------|
 | 🖥️ **Desktop Settings** | `keepAwakeEnabled`, sidebar/menuBar preferences |
-| 🤖 **CoWork Settings** | Scheduled tasks, web search, network mode, enabled plugins, marketplaces |
+| 🤖 **CoWork Settings** | Scheduled tasks, web search, browser use, network mode, egress policy, enabled plugins, marketplaces |
 | 🔌 **MCP Servers** | Server names, commands, arguments, environment variable keys |
 | 🧩 **Extensions (DXT)** | Installed extensions, signature status, dangerous tool grants |
 | ⚙️ **Extension Settings** | Per-extension allowed directories and configuration |
 | 🚦 **Extension Governance** | Allowlist enabled/disabled, blocklist entries |
 | 📦 **Plugins** | Installed, remote (org-deployed), cached (downloaded) |
+| 🪝 **Plugin Hooks** | Lifecycle hooks executing shell commands (PreToolUse, PostToolUse, Stop, etc.) |
 | 🔗 **Connectors** | OAuth-authenticated web services, desktop integrations |
 | 🎯 **Skills** | User-created, scheduled, session-local, and plugin skills across 9 paths |
 | ⏰ **Scheduled Tasks** | Task names, cron expressions (with plain English translation) |
 | 🔐 **App Config** | OAuth token presence, network mode, extension allowlist keys |
+| 🔇 **Disabled MCP Tools** | Per-session tools explicitly disabled (with dangerous tool callout) |
 | 🏃 **Runtime State** | Running processes, sleep assertions, LaunchAgents, crontab entries |
 | 🍪 **Cookies** | `Cookies` and `Cookies-journal` presence |
 

@@ -43,7 +43,7 @@ The script follows this structure:
 ```
 ~/Library/Application Support/Claude/          # Claude Desktop dir
   claude_desktop_config.json                   # Desktop prefs + MCP servers
-  config.json                                  # App config (network mode, oauth, allowlists)
+  config.json                                  # App config (network mode, allowlists, device ID)
   extensions-installations.json                # DXT extensions
   extensions-blocklist.json                    # Extension governance
   Claude Extensions Settings/*.json            # Per-extension settings
@@ -130,7 +130,7 @@ When run as root (uid 0) — which is how MDMs like FleetDM, Jamf, Mosyle, and C
 - **Read-only** — never modifies any audited files
 - **No eval** — no dynamic code execution
 - **All variables quoted** — no word-splitting or injection vectors
-- **OAuth tokens redacted** — `[REDACTED]` in all output formats
+- **Sensitive values redacted** — `[REDACTED]` in all output formats
 - **MCP env vars** — only key names emitted, never values
 - **MCP args** — patterns matching `sk-`, `key=`, `token=`, `secret=`, `password=` are redacted
 - **HTML output** — created with `umask 077` (mode 0600)

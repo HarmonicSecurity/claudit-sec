@@ -444,15 +444,12 @@ The app config contains application-level settings including OAuth tokens, netwo
 
 ---
 
-### 🔑 Unencrypted OAuth Token in Plaintext Config
+### 🔑 OAuth Token Storage (Not Checked)
 
-- **What**: Checks whether `config.json` contains the key `oauth:tokenCache` with a non-empty value. If present, this means OAuth tokens are stored as plaintext JSON rather than in the macOS Keychain.
-- **Why it matters**:
-  - 🔴 **Risk**: Plaintext OAuth tokens can be read by any process running as the user. If the machine is compromised, the attacker gets immediate access to all OAuth-connected services without needing to crack any encryption. This is a credential storage vulnerability.
-  - 📜 **Compliance**: Storing credentials in plaintext violates most security baselines (CIS, NIST 800-53 IA-5, PCI DSS Req 8). Credentials should be stored in the system keychain or a hardware-backed credential store.
-  - 🤖 **AI enablement**: The presence of OAuth tokens indicates Claude has authenticated connections to external services.
-- **Severity**: ⚠️ `WARN` — Plaintext credential storage is a well-known security anti-pattern.
-- **Recommendation**: Report to Anthropic if this is unexpected behavior. Ensure the machine has FileVault enabled (encrypts disk at rest). Monitor for unauthorized access to the config file. The token value is automatically redacted in all CLAUDIT output formats.
+- **What**: `config.json` may contain the key `oauth:tokenCache`. CLAUDIT previously flagged this as a plaintext credential storage issue. **This check has been removed** because the value is encrypted using Electron's [`safeStorage`](https://www.electronjs.org/docs/latest/api/safe-storage) API — it is not stored in plaintext.
+- **Why it was removed**: The `oauth:tokenCache` value is prefixed with `v10` (base64: `djEw`), which is the Electron safeStorage version marker. On macOS, safeStorage encrypts data using an AES key stored in the system Keychain, protected by Claude Desktop's code signature. Only the same application running as the same user can decrypt it. This is the standard credential storage approach used by all major Electron apps (VS Code, Slack, Discord, etc.) and is not a security finding.
+- **Severity**: None — no finding is generated. The key is still redacted in JSON output as a defence-in-depth measure.
+- **Recommendation**: No action required.
 
 ---
 
@@ -578,7 +575,7 @@ CLAUDIT uses five severity levels. Here is what each means and when it is applie
 
 | Emoji | Level | Meaning | Used When |
 |-------|-------|---------|-----------|
-| ⚠️ | `WARN` | Security-relevant finding requiring review | Autonomous capabilities enabled, unsigned extensions, dangerous tools, governance controls missing, plaintext credentials, runtime anomalies |
+| ⚠️ | `WARN` | Security-relevant finding requiring review | Autonomous capabilities enabled, unsigned extensions, dangerous tools, governance controls missing, runtime anomalies |
 | 🔍 | `REVIEW` | Notable item requiring human assessment | Org-deployed remote plugins (expected but should be verified) |
 | ℹ️ | `INFO` | Informational — no action required | Processes running, permissions granted, connectors authenticated, read errors, missing directories |
 
@@ -599,16 +596,15 @@ Here is a complete catalog of every `add_finding` call in CLAUDIT, organized by 
 | 5 | Cowork Settings | Allow all browser actions ENABLED | `preferences.allowAllBrowserActions == true` |
 | 6 | Security | Cowork VM egress is UNRESTRICTED | `egressAllowedDomains == ["*"]` in any `local_*.json` session file |
 | 7 | Security | Plugin hooks executing commands | 1 or more `hooks/hooks.json` files found with command-type hooks |
-| 8 | Security | Unencrypted OAuth token in plaintext config | `oauth:tokenCache` key present and non-empty in `config.json` |
-| 9 | Security | Extension allowlist DISABLED | Any `dxt:allowlistEnabled` key set to `"false"` in `config.json` |
-| 10 | Security | Extension blocklist is empty | `extensions-blocklist.json` exists but has 0 entries |
-| 11 | Extensions | Unsigned extension | Extension with `signatureInfo.status == "unsigned"` |
-| 12 | Extensions | Extension has dangerous tools | Extension declares `execute_javascript`, `write_file`, `edit_file`, `run_command`, or `execute_sql` |
-| 13 | Scheduled Tasks | Active scheduled task | Any task in `scheduled-tasks.json` with `enabled == true` |
-| 14 | Runtime | Sleep prevention assertion by Claude/Electron | `pmset -g assertions` output contains "Claude" or "Electron" |
-| 15 | Runtime | Claude-related crontab entry | User's `crontab -l` output contains "claude" (case-insensitive) |
-| 16 | Runtime | Claude LaunchAgent(s) found | Plist file in `~/Library/LaunchAgents/` containing "claude" in filename |
-| 17 | Runtime | Debug directory is large | `~/Library/Application Support/Claude/debug/` exceeds 100 MB |
+| 8 | Security | Extension allowlist DISABLED | Any `dxt:allowlistEnabled` key set to `"false"` in `config.json` |
+| 9 | Security | Extension blocklist is empty | `extensions-blocklist.json` exists but has 0 entries |
+| 10 | Extensions | Unsigned extension | Extension with `signatureInfo.status == "unsigned"` |
+| 11 | Extensions | Extension has dangerous tools | Extension declares `execute_javascript`, `write_file`, `edit_file`, `run_command`, or `execute_sql` |
+| 12 | Scheduled Tasks | Active scheduled task | Any task in `scheduled-tasks.json` with `enabled == true` |
+| 13 | Runtime | Sleep prevention assertion by Claude/Electron | `pmset -g assertions` output contains "Claude" or "Electron" |
+| 14 | Runtime | Claude-related crontab entry | User's `crontab -l` output contains "claude" (case-insensitive) |
+| 15 | Runtime | Claude LaunchAgent(s) found | Plist file in `~/Library/LaunchAgents/` containing "claude" in filename |
+| 16 | Runtime | Debug directory is large | `~/Library/Application Support/Claude/debug/` exceeds 100 MB |
 
 ### 🔍 REVIEW Findings
 
@@ -659,15 +655,14 @@ CLAUDIT also builds a **Recommendations** list at the end of the report. Recomme
 3. ✍️ Unsigned extensions are installed
 4. ⚠️ Extensions have dangerous tools
 5. 🔌 MCP servers are configured
-6. 🔑 OAuth token is stored in plaintext
-7. 🔓 Extension allowlist is disabled
-8. 🌐 Web search is enabled
-9. 🌍 Allow all browser actions is enabled
-10. 🚪 Cowork VM network egress is unrestricted
-11. 🪝 Plugin hooks execute commands on lifecycle events
-12. 📡 Remote plugins are deployed
-13. 📦 Cached (not installed) plugins exist
-14. 🔐 Web connectors are authenticated
+6. 🔓 Extension allowlist is disabled
+7. 🌐 Web search is enabled
+8. 🌍 Allow all browser actions is enabled
+9. 🚪 Cowork VM network egress is unrestricted
+10. 🪝 Plugin hooks execute commands on lifecycle events
+11. 📡 Remote plugins are deployed
+12. 📦 Cached (not installed) plugins exist
+13. 🔐 Web connectors are authenticated
 
 ---
 

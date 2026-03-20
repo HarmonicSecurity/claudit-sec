@@ -31,7 +31,7 @@ CLAUDIT gives you that visibility in a single command.
 | 🔗 **Connectors** | OAuth-authenticated web services, desktop integrations |
 | 🎯 **Skills** | User-created, scheduled, session-local, and plugin skills across 9 paths |
 | ⏰ **Scheduled Tasks** | Task names, cron expressions (with plain English translation) |
-| 🔐 **App Config** | OAuth token presence, network mode, extension allowlist keys |
+| 🔐 **App Config** | Network mode, extension allowlist/blocklist keys, device identifiers |
 | 🔇 **Disabled MCP Tools** | Per-session tools explicitly disabled (with dangerous tool callout) |
 | 🏃 **Runtime State** | Running processes, sleep assertions, LaunchAgents, crontab entries |
 | 🍪 **Cookies** | `Cookies` and `Cookies-journal` presence |

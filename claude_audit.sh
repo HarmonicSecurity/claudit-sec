@@ -375,12 +375,8 @@ collect_app_config() { # claude_dir
         COWORK_NETWORK_MODE="$nm"; APP_CONFIG[coworkNetworkMode]="$nm"
     fi
 
-    local has_oauth
-    has_oauth=$(printf '%s' "$data" | jq -r 'has("oauth:tokenCache") and (.["oauth:tokenCache"] | length > 0)')
-    if [[ "$has_oauth" == "true" ]]; then
-        add_finding "WARN" "Security" "Unencrypted OAuth token in plaintext config" "oauth:tokenCache present in config.json"
-        APP_CONFIG[oauth:tokenCache]="[REDACTED]"
-    fi
+    # oauth:tokenCache is encrypted via Electron safeStorage (Keychain-backed AES, v10 prefix)
+    # — standard Electron credential storage, not a security finding
 
     local dxt_keys
     dxt_keys=$(printf '%s' "$data" | jq -r 'keys[] | select(contains("dxt:allowlistEnabled"))' 2>/dev/null) || true
@@ -1185,11 +1181,6 @@ build_recommendations() {
 
     ((${#MCP_NAMES[@]} > 0)) && RECOMMENDATIONS+=("${#MCP_NAMES[@]} MCP server(s) configured — verify each is expected")
 
-    local has_oauth=false
-    for ((i=0; i<${#FINDING_MSG[@]}; i++)); do
-        [[ "${FINDING_SECT[$i]}" == "Security" && "${FINDING_SEV[$i]}" == "WARN" && "${(L)FINDING_MSG[$i]}" == *oauth* ]] && has_oauth=true
-    done
-    [[ "$has_oauth" == "true" ]] && RECOMMENDATIONS+=("OAuth token stored in plaintext config.json")
 
     local al_count=0
     for ((i=0; i<${#FINDING_MSG[@]}; i++)); do [[ "${(L)FINDING_MSG[$i]}" == *"allowlist disabled"* ]] && ((al_count++)); done
@@ -1508,10 +1499,6 @@ BANNER
 
     # Security Findings
     _section_hdr "SECURITY FINDINGS"; local found_sec=false
-    for ((i=0;i<${#FINDING_SEV[@]};i++)); do
-        [[ "${FINDING_SECT[$i]}" == "Security" && ("${(L)FINDING_MSG[$i]}" == *oauth* || "${(L)FINDING_MSG[$i]}" == *token*) ]] && {
-            echo "  $(_sev_color "${FINDING_SEV[$i]}" "[${FINDING_SEV[$i]}]") ${FINDING_MSG[$i]}"; found_sec=true; }
-    done
     for ((i=0;i<${#FINDING_SEV[@]};i++)); do
         [[ "${FINDING_SECT[$i]}" == "Security" && "${(L)FINDING_MSG[$i]}" == *allowlist* ]] && {
             echo "  $(_sev_color "${FINDING_SEV[$i]}" "[${FINDING_SEV[$i]}]") ${FINDING_MSG[$i]}"; found_sec=true; }

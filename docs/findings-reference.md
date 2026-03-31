@@ -1,6 +1,6 @@
 # 📋 CLAUDIT-SEC Findings Reference
 
-> **A comprehensive reference for every check performed by CLAUDIT-SEC v2.2.0**
+> **A comprehensive reference for every check performed by CLAUDIT-SEC v2.3.0**
 >
 > This document is intended for security teams, compliance reviewers, and administrators who need to understand exactly what CLAUDIT inspects, why each check matters, and how to respond when findings are flagged.
 
@@ -10,20 +10,22 @@
 
 1. [🖥️ Desktop Settings](#1--desktop-settings)
 2. [🤖 Cowork Settings](#2--cowork-settings)
-3. [🔌 MCP Servers](#3--mcp-servers)
-4. [🧩 Extensions (DXT)](#4--extensions-dxt)
-5. [📂 Extension Settings](#5--extension-settings)
-6. [🛡️ Extension Governance (Blocklist & Allowlist)](#6--extension-governance-blocklist--allowlist)
-7. [🔗 Plugins](#7--plugins)
-8. [🪝 Plugin Hooks](#8--plugin-hooks)
-9. [🌐 Connectors](#9--connectors)
-10. [🎯 Skills](#10--skills)
-11. [⏰ Scheduled Tasks](#11--scheduled-tasks)
-12. [⚙️ App Config (config.json)](#12--app-config-configjson)
-13. [💻 Claude Code Settings](#13--claude-code-settings)
-14. [🏃 Runtime State](#14--runtime-state)
-15. [🍪 Cookies](#15--cookies)
-16. [📊 Severity Level Reference](#16--severity-level-reference)
+3. [📲 Dispatch](#3--dispatch)
+4. [🏢 Workspaces](#4--workspaces)
+5. [🔌 MCP Servers](#5--mcp-servers)
+6. [🧩 Extensions (DXT)](#6--extensions-dxt)
+7. [📂 Extension Settings](#7--extension-settings)
+8. [🛡️ Extension Governance (Blocklist & Allowlist)](#8--extension-governance-blocklist--allowlist)
+9. [🔗 Plugins](#9--plugins)
+10. [🪝 Plugin Hooks](#10--plugin-hooks)
+11. [🌐 Connectors](#11--connectors)
+12. [🎯 Skills](#12--skills)
+13. [⏰ Scheduled Tasks](#13--scheduled-tasks)
+14. [⚙️ App Config (config.json)](#14--app-config-configjson)
+15. [💻 Claude Code Settings](#15--claude-code-settings)
+16. [🏃 Runtime State](#16--runtime-state)
+17. [🍪 Cookies](#17--cookies)
+18. [📊 Severity Level Reference](#18--severity-level-reference)
 
 ---
 
@@ -161,7 +163,91 @@ Cowork is Claude Desktop's agentic mode. These checks examine settings that cont
 
 ---
 
-## 3. 🔌 MCP Servers
+## 3. 📲 Dispatch
+
+**Source files:** `bridge-state.json`, `local_*.json` (session files) → `hostLoopMode`
+
+Dispatch is Claude Desktop's mobile-to-desktop task assignment feature. It allows a user's phone to remotely trigger tasks on their desktop machine. CLAUDIT detects dispatch state from two sources: the bridge configuration file and active session state.
+
+---
+
+### 🌉 Dispatch Bridge Configured
+
+- **What**: Reads `bridge-state.json` at the root of the Claude Desktop data directory. Each key is a `userUUID:orgUUID` pair with `enabled` and `userConsented` boolean fields. If any entry has `enabled: true`, this finding is generated.
+- **Why it matters**:
+  - 🔴 **Risk**: When the dispatch bridge is configured, the user's mobile device can remotely trigger tasks on this desktop machine. Even when no dispatch session is actively running, the bridge is ready to accept incoming tasks. This means the desktop is a remote execution target — a compromised mobile device or stolen phone could dispatch tasks that access files, connectors, and tools configured on the desktop.
+  - 📜 **Compliance**: Remote task execution introduces a new control plane that may not be covered by existing endpoint security policies. The mobile device effectively becomes a remote access vector to the desktop's Claude capabilities.
+  - 🤖 **AI enablement**: Dispatch is designed for users who want to start tasks from their phone and have them execute on a more capable desktop machine. Understanding bridge state is critical for assessing mobile-to-desktop AI data flows.
+- **Severity**: ⚠️ `WARN` — Dispatch bridge configuration means the desktop is a potential remote execution target.
+- **Recommendation**: Verify the user intentionally configured dispatch. Ensure the mobile device has adequate security controls (passcode, biometrics, MDM enrollment). Review what connectors and tools are available to dispatched tasks. Disable dispatch if the user does not need mobile-to-desktop task assignment.
+
+---
+
+### 📡 Dispatch Actively Accepting Tasks
+
+- **What**: Checks `hostLoopMode` in `local_*.json` session files. When `true`, the desktop is actively accepting and executing tasks dispatched from a mobile device. Reports the number of active dispatch sessions.
+- **Why it matters**:
+  - 🔴 **Risk**: Active dispatch means the desktop is currently processing or waiting for tasks from the mobile device. This is the highest-risk dispatch state — the phone is actively controlling desktop execution. All desktop capabilities (files, MCP servers, connectors, extensions) are available to dispatched tasks.
+  - 📜 **Compliance**: Active remote task execution should be logged and monitored. The mobile device is effectively a remote control for the desktop's AI agent.
+  - 🤖 **AI enablement**: Active dispatch sessions indicate the user is leveraging mobile-to-desktop workflows in real time.
+- **Severity**: ⚠️ `WARN` — Active dispatch is a high-autonomy state that merits immediate review.
+- **Recommendation**: Verify the user is actively using dispatch. If dispatch sessions persist when the user is not actively dispatching from their phone, investigate whether the session is stale or if the bridge configuration needs to be reset.
+
+---
+
+### 🔀 Three-State Display
+
+CLAUDIT displays dispatch in three states across all output formats:
+
+| State | Condition | Display |
+|-------|-----------|---------|
+| **OFF** | No bridge configured, no active sessions | `OFF` (green) |
+| **CONFIGURED** | `bridge-state.json` has `enabled: true` but no active `hostLoopMode` sessions | `CONFIGURED` (yellow) |
+| **ON** | Any `local_*.json` has `hostLoopMode: true` | `ON` (yellow) |
+
+---
+
+## 4. 🏢 Workspaces
+
+**Source files:** `local-agent-mode-sessions/<org>/<user>/` directories, `config.json` (DXT keys), `bridge-state.json`
+
+Claude Desktop can have multiple workspaces (accounts) active simultaneously — for example, a personal free account, a Teams subscription, and an Enterprise subscription. CLAUDIT detects and inventories all workspaces.
+
+---
+
+### 🔍 Workspace Detection
+
+- **What**: Enumerates user UUID directories under each org UUID in `local-agent-mode-sessions/`. Also discovers additional workspaces from `config.json` DXT allowlist keys (`dxt:allowlistEnabled:<userUUID>`) that may not have session directories. For each workspace, CLAUDIT collects:
+  - **User UUID** (truncated to 8 chars in display)
+  - **Account name** and **email** (from the first session file with data)
+  - **Session count** (number of `local_*.json` files)
+  - **Indicators**: DXT-managed (Enterprise), org-plugins (Teams/Enterprise), dispatch-bridge (active bridge)
+- **Why it matters**:
+  - 🔍 **Visibility**: Multiple workspaces mean the user has access to multiple Claude subscriptions, potentially with different capability levels and organizational controls. An Enterprise workspace may have DXT allowlists and blocklists while a personal workspace has no governance controls.
+  - 📜 **Compliance**: Organizations should know if users have personal Claude accounts alongside managed accounts. Personal accounts bypass organizational governance controls (extension allowlists, blocklists, plugin restrictions).
+  - 🤖 **AI enablement**: Workspace count and type indicators help administrators understand the user's Claude footprint and which workspaces have organizational controls.
+- **Severity**: ℹ️ `INFO` — Multiple workspaces are informational but important for understanding the user's full Claude configuration.
+- **Recommendation**: Review workspace indicators to understand which workspaces are organizationally managed (DXT-managed) versus personal. Ensure organizational governance controls are applied to the appropriate workspaces.
+
+---
+
+### 🏷️ Workspace Indicators
+
+| Indicator | Source | Meaning |
+|-----------|--------|---------|
+| **DXT-managed** | `config.json` → `dxt:allowlistEnabled:<userUUID>` is `true` | Workspace has organizational extension governance (Enterprise indicator) |
+| **org-plugins** | `remote_cowork_plugins/` directory exists under the user UUID | Workspace receives org-deployed plugins (Teams/Enterprise indicator) |
+| **dispatch-bridge** | `bridge-state.json` has `enabled: true` for this user UUID | Dispatch bridge is configured for this workspace |
+
+---
+
+### ⚠️ Limitations
+
+Plan type (Free, Pro, Max, Teams, Enterprise) is not stored in any locally accessible configuration file. CLAUDIT uses indirect indicators (DXT allowlist, remote plugins, bridge state) to infer workspace characteristics. The actual plan type is managed server-side by Anthropic.
+
+---
+
+## 5. 🔌 MCP Servers
 
 **Source file:** `claude_desktop_config.json` → `mcpServers`
 
@@ -181,7 +267,7 @@ MCP (Model Context Protocol) servers are external processes that Claude launches
 
 ---
 
-## 4. 🧩 Extensions (DXT)
+## 6. 🧩 Extensions (DXT)
 
 **Source file:** `~/Library/Application Support/Claude/extensions-installations.json`
 
@@ -213,7 +299,7 @@ DXT extensions are packaged plugins for Claude Desktop that provide tools and ca
 
 ---
 
-## 5. 📂 Extension Settings
+## 7. 📂 Extension Settings
 
 **Source directory:** `~/Library/Application Support/Claude/Claude Extensions Settings/*.json`
 
@@ -233,7 +319,7 @@ Per-extension settings files contain user-configured options, including filesyst
 
 ---
 
-## 6. 🛡️ Extension Governance (Blocklist & Allowlist)
+## 8. 🛡️ Extension Governance (Blocklist & Allowlist)
 
 **Source files:** `extensions-blocklist.json`, `config.json` (keys containing `dxt:allowlistEnabled`)
 
@@ -265,7 +351,7 @@ These checks examine organizational governance controls over extensions.
 
 ---
 
-## 7. 🔗 Plugins
+## 9. 🔗 Plugins
 
 **Source files:** `installed_plugins.json`, `remote_cowork_plugins/manifest.json`, marketplace directories, cache directories (per session)
 
@@ -306,7 +392,7 @@ Plugins extend Claude Cowork's capabilities. They come in three categories: inst
 
 ---
 
-## 8. 🪝 Plugin Hooks
+## 10. 🪝 Plugin Hooks
 
 **Source files:** `hooks/hooks.json` inside plugin directories (cowork cached plugins, CC marketplace plugins, remote plugins)
 
@@ -335,7 +421,7 @@ Plugin hooks are shell commands that plugins register to run at specific lifecyc
 
 ---
 
-## 9. 🌐 Connectors
+## 11. 🌐 Connectors
 
 **Source files:** `local_*.json` (session files) → `remoteMcpServersConfig`, `.mcp.json` (from remote plugins), extensions, MCP servers
 
@@ -365,7 +451,7 @@ Connectors represent all the external services and integrations that Claude can 
 
 ---
 
-## 10. 🎯 Skills
+## 12. 🎯 Skills
 
 **Source paths:** 9 different filesystem locations (see Architecture section)
 
@@ -406,7 +492,7 @@ Skills are SKILL.md files that define reusable prompts and instructions for Clau
 
 ---
 
-## 11. ⏰ Scheduled Tasks
+## 13. ⏰ Scheduled Tasks
 
 **Source file:** `scheduled-tasks.json` (per session)
 
@@ -436,7 +522,7 @@ Scheduled tasks are cron-scheduled autonomous Claude sessions. Each task has a c
 
 ---
 
-## 12. ⚙️ App Config (config.json)
+## 14. ⚙️ App Config (config.json)
 
 **Source file:** `~/Library/Application Support/Claude/config.json`
 
@@ -463,7 +549,7 @@ The app config contains application-level settings including OAuth tokens, netwo
 
 ---
 
-## 13. 💻 Claude Code Settings
+## 15. 💻 Claude Code Settings
 
 **Source file:** `~/.claude/settings.json`
 
@@ -483,7 +569,7 @@ Claude Code is the CLI-based Claude interface. Its settings file contains permis
 
 ---
 
-## 14. 🏃 Runtime State
+## 16. 🏃 Runtime State
 
 **Source:** System commands (`pgrep`, `pmset`, `crontab`, filesystem)
 
@@ -550,7 +636,7 @@ Runtime checks examine the live state of the system to detect Claude-related pro
 
 ---
 
-## 15. 🍪 Cookies
+## 17. 🍪 Cookies
 
 **Source files:** `~/Library/Application Support/Claude/Cookies`, `~/Library/Application Support/Claude/Cookies-journal`
 
@@ -569,7 +655,7 @@ Claude Desktop (as an Electron app) maintains browser-like cookie storage.
 
 ---
 
-## 16. 📊 Severity Level Reference
+## 18. 📊 Severity Level Reference
 
 CLAUDIT uses five severity levels. Here is what each means and when it is applied:
 
@@ -605,6 +691,8 @@ Here is a complete catalog of every `add_finding` call in CLAUDIT, organized by 
 | 14 | Runtime | Claude-related crontab entry | User's `crontab -l` output contains "claude" (case-insensitive) |
 | 15 | Runtime | Claude LaunchAgent(s) found | Plist file in `~/Library/LaunchAgents/` containing "claude" in filename |
 | 16 | Runtime | Debug directory is large | `~/Library/Application Support/Claude/debug/` exceeds 100 MB |
+| 17 | Dispatch | Dispatch bridge CONFIGURED | `bridge-state.json` has any entry with `enabled: true` |
+| 18 | Dispatch | Dispatch actively accepting tasks | Any `local_*.json` has `hostLoopMode: true` |
 
 ### 🔍 REVIEW Findings
 
@@ -621,6 +709,7 @@ Here is a complete catalog of every `add_finding` call in CLAUDIT, organized by 
 | 3 | Connectors | Web connectors authenticated | 1 or more web connectors found with active OAuth connections |
 | 4 | Claude Code | Permissions granted | `permissions.allow` array is non-empty in `~/.claude/settings.json` |
 | 5 | Runtime | Claude is running | `pgrep -fl Claude` returns results |
+| 6 | Workspaces | Multiple workspaces detected | More than 1 workspace (user UUID) found across session directories and config keys |
 
 ---
 
@@ -642,6 +731,8 @@ The following data is collected and displayed in the report but does **not** gen
 | Scheduled Tasks | Disabled tasks | Historical workflow inventory |
 | App Config | Network mode, device ID (ant-did) | Configuration context |
 | Disabled MCP Tools | Per-session disabled tool list with dangerous tool callout | Tool restriction inventory |
+| Workspaces | Workspace table (user UUID, account name, email, session count, indicators) | Multi-account inventory |
+| Dispatch | Three-state display (OFF/CONFIGURED/ON) | Mobile-to-desktop bridge state |
 | Cookies | Cookie file presence | Artifact inventory |
 
 ---
@@ -663,7 +754,9 @@ CLAUDIT also builds a **Recommendations** list at the end of the report. Recomme
 11. 📡 Remote plugins are deployed
 12. 📦 Cached (not installed) plugins exist
 13. 🔐 Web connectors are authenticated
+14. 📲 Dispatch bridge is configured (mobile-to-desktop)
+15. 📡 Dispatch is actively accepting tasks
 
 ---
 
-*This document was generated for CLAUDIT-SEC v2.2.0. Last updated: 2026-03-19.*
+*This document was generated for CLAUDIT-SEC v2.3.0. Last updated: 2026-03-31.*

@@ -1671,16 +1671,8 @@ BANNER
     # Security Findings
     _section_hdr "SECURITY FINDINGS"; local found_sec=false
     for ((i=0;i<${#FINDING_SEV[@]};i++)); do
-        [[ "${FINDING_SECT[$i]}" == "Security" && "${(L)FINDING_MSG[$i]}" == *allowlist* ]] && {
-            echo "  $(_sev_color "${FINDING_SEV[$i]}" "[${FINDING_SEV[$i]}]") ${FINDING_MSG[$i]}"; found_sec=true; }
-    done
-    for ((i=0;i<${#FINDING_SEV[@]};i++)); do
-        [[ "${FINDING_SECT[$i]}" == "Security" && "${(L)FINDING_MSG[$i]}" == *blocklist* ]] && {
-            echo "  $(_sev_color "${FINDING_SEV[$i]}" "[${FINDING_SEV[$i]}]") ${FINDING_MSG[$i]}"; found_sec=true; }
-    done
-    for ((i=0;i<${#FINDING_SEV[@]};i++)); do
-        [[ "${FINDING_SECT[$i]}" == "Runtime" && "${FINDING_SEV[$i]}" != "INFO" && "${FINDING_SEV[$i]}" != "OK" ]] && {
-            echo "  $(_sev_color "${FINDING_SEV[$i]}" "[${FINDING_SEV[$i]}]") ${FINDING_MSG[$i]}"; found_sec=true; }
+        [[ "${FINDING_SEV[$i]}" == "WARN" ]] && {
+            echo "  $(_sev_color "WARN" "[WARN]") ${FINDING_MSG[$i]}"; found_sec=true; }
     done
     [[ "$found_sec" == "true" ]] || echo "  $(_green 'No security issues detected.')"; echo
 
@@ -1944,13 +1936,8 @@ HTMLEOF
     echo '<details open><summary>Security Findings</summary><div class="detail-content">'
     local fany=false
     for ((i=0;i<${#FINDING_SEV[@]};i++)); do
-        [[ "${FINDING_SECT[$i]}" != "Security" ]] && continue
-        [[ "$quiet" == "true" && "${FINDING_SEV[$i]}" != "CRITICAL" && "${FINDING_SEV[$i]}" != "WARN" ]] && continue
-        printf '<div class="finding">%s %s</div>\n' "$(_badge_html "${FINDING_SEV[$i]}")" "$(_h "${FINDING_MSG[$i]}")"; fany=true
-    done
-    for ((i=0;i<${#FINDING_SEV[@]};i++)); do
-        [[ "${FINDING_SECT[$i]}" == "Runtime" && "${FINDING_SEV[$i]}" != "INFO" && "${FINDING_SEV[$i]}" != "OK" ]] && {
-            printf '<div class="finding">%s %s</div>\n' "$(_badge_html "${FINDING_SEV[$i]}")" "$(_h "${FINDING_MSG[$i]}")"; fany=true; }
+        [[ "${FINDING_SEV[$i]}" != "WARN" ]] && continue
+        printf '<div class="finding">%s %s</div>\n' "$(_badge_html "WARN")" "$(_h "${FINDING_MSG[$i]}")"; fany=true
     done
     [[ "$fany" == "true" ]] || echo '<p style="color:#28a745">No security issues detected.</p>'; echo '</div></details>'
 

@@ -46,6 +46,15 @@ EGRESS_DOMAINS=""            # most-permissive egress policy found across sessio
 EGRESS_UNRESTRICTED=false    # true if any session has ["*"]
 # Disabled MCP tools (tool keys explicitly set to false)
 DISABLED_MCP_TOOLS=()
+# Dispatch (mobile-to-desktop task assignment)
+DISPATCH_SESSION_COUNT=0     # sessions with hostLoopMode active (accepting dispatch)
+DISPATCH_ACTIVE=false        # true if any session has hostLoopMode enabled
+DISPATCH_BRIDGE_ENABLED=false  # true if bridge-state.json shows dispatch configured
+DISPATCH_BRIDGE_CONSENTED=false # true if user consented to dispatch bridge
+# Workspaces (user UUIDs under org)
+WS_UUIDS=() ; WS_ACCT_NAMES=() ; WS_EMAILS=() ; WS_SESSION_COUNTS=()
+WS_DXT_ALLOWLISTS=() ; WS_HAS_REMOTE_PLUGINS=() ; WS_BRIDGE_ACTIVE=()
+WS_ORG_UUID=""
 # Plugin hooks
 HOOK_PLUGINS=() ; HOOK_EVENTS=() ; HOOK_CMDS=()
 
@@ -368,6 +377,9 @@ collect_app_config() { # claude_dir
         return
     fi
     [[ -z "$data" || "$data" == "null" ]] && return
+
+    # Store raw for workspace detection
+    APP_CONFIG[_raw_config]="$data"
 
     local nm
     nm=$(printf '%s' "$data" | jq -r '.coworkNetworkMode // ""')
@@ -696,6 +708,120 @@ collect_plugin_hooks() { # uses SESSION_DIRS, home
         "Plugins: $(printf '%s\n' "${HOOK_PLUGINS[@]}" | sort -u | tr '\n' ',' | sed 's/,$//')"
 }
 
+collect_workspaces() { # claude_dir — enumerates user UUIDs under each org
+    local claude_dir="$1"
+    local sessions_dir="$claude_dir/local-agent-mode-sessions"
+    [[ -d "$sessions_dir" ]] || return 0
+
+    # Discover org/user pairs from directory structure
+    local org_dir
+    for org_dir in "$sessions_dir"/*/; do
+        [[ -d "$org_dir" ]] || continue
+        local org_name; org_name=$(basename "$org_dir")
+        [[ "$org_name" == .* || "$org_name" == "skills-plugin" ]] && continue
+        WS_ORG_UUID="$org_name"
+
+        local user_dir
+        for user_dir in "$org_dir"*/; do
+            [[ -d "$user_dir" ]] || continue
+            local uid; uid=$(basename "$user_dir")
+            [[ "$uid" == .* ]] && continue
+
+            WS_UUIDS+=("$uid")
+
+            # Count session files
+            local sc=0; local _e
+            for _e in "$user_dir"/local_*.json; do [[ -f "$_e" ]] && ((sc++)); done
+            WS_SESSION_COUNTS+=("$sc")
+
+            # Get account name/email from first session file with data
+            local acct="" email=""
+            for _e in "$user_dir"/local_*.json; do
+                [[ -f "$_e" ]] || continue
+                local _pair
+                _pair=$(jq -r '[(.accountName // ""), (.emailAddress // "")] | join("\t")' "$_e" 2>/dev/null) || continue
+                local _a="${_pair%%	*}" _em="${_pair#*	}"
+                if [[ -n "$_a" && "$_a" != "null" ]]; then acct="$_a"; email="${_em:-}"; break; fi
+            done
+            WS_ACCT_NAMES+=("$acct")
+            [[ "$email" == "null" ]] && email=""
+            WS_EMAILS+=("$email")
+
+            # DXT allowlist enabled for this user UUID (from config.json)
+            local dxt_val
+            dxt_val=$(printf '%s' "${APP_CONFIG[_raw_config]:-"{}"}" | jq -r --arg k "dxt:allowlistEnabled:$uid" '.[$k] // "unset"' 2>/dev/null) || true
+            WS_DXT_ALLOWLISTS+=("$dxt_val")
+
+            # Has remote_cowork_plugins directory (Teams/Enterprise indicator)
+            if [[ -d "$user_dir/remote_cowork_plugins" ]]; then
+                WS_HAS_REMOTE_PLUGINS+=(true)
+            else
+                WS_HAS_REMOTE_PLUGINS+=(false)
+            fi
+
+            # Bridge active for this user
+            WS_BRIDGE_ACTIVE+=(false)  # updated by collect_bridge below
+        done
+    done
+
+    # Also check config.json for user UUIDs with DXT entries but no session dir
+    local config_path="$claude_dir/config.json"
+    if [[ -f "$config_path" ]]; then
+        local dxt_uids
+        dxt_uids=$(jq -r 'keys[] | select(startswith("dxt:allowlistEnabled:")) | split(":")[2]' "$config_path" 2>/dev/null) || true
+        while IFS= read -r duid; do
+            [[ -z "$duid" ]] && continue
+            # Check if already found
+            local found=false; local wi
+            for ((wi=0; wi<${#WS_UUIDS[@]}; wi++)); do [[ "${WS_UUIDS[$wi]}" == "$duid" ]] && { found=true; break; }; done
+            [[ "$found" == "false" ]] && {
+                WS_UUIDS+=("$duid"); WS_SESSION_COUNTS+=(0); WS_ACCT_NAMES+=(""); WS_EMAILS+=("")
+                local dxt_v; dxt_v=$(jq -r --arg k "dxt:allowlistEnabled:$duid" '.[$k] // "unset"' "$config_path" 2>/dev/null) || true
+                WS_DXT_ALLOWLISTS+=("$dxt_v")
+                # Check if session dir exists for this UUID under known org
+                if [[ -n "$WS_ORG_UUID" && -d "$sessions_dir/$WS_ORG_UUID/$duid/remote_cowork_plugins" ]]; then
+                    WS_HAS_REMOTE_PLUGINS+=(true)
+                else
+                    WS_HAS_REMOTE_PLUGINS+=(false)
+                fi
+                WS_BRIDGE_ACTIVE+=(false)
+            }
+        done <<< "$dxt_uids"
+    fi
+
+    # Bridge-state.json for dispatch detection
+    local bridge_path="$claude_dir/bridge-state.json"
+    if [[ -f "$bridge_path" ]]; then
+        local bridge_data
+        bridge_data=$(safe_read_json "$bridge_path") || true
+        if [[ -z "$JSON_ERROR" && -n "$bridge_data" && "$bridge_data" != "null" ]]; then
+            # Each key is "userUUID:orgUUID"
+            local bridge_keys
+            bridge_keys=$(printf '%s' "$bridge_data" | jq -r 'keys[]' 2>/dev/null) || true
+            while IFS= read -r bk; do
+                [[ -z "$bk" ]] && continue
+                local b_uid="${bk%%:*}"
+                local b_enabled b_consented
+                b_enabled=$(printf '%s' "$bridge_data" | jq -r --arg k "$bk" '.[$k].enabled // false')
+                b_consented=$(printf '%s' "$bridge_data" | jq -r --arg k "$bk" '.[$k].userConsented // false')
+                [[ "$b_enabled" == "true" ]] && DISPATCH_BRIDGE_ENABLED=true
+                [[ "$b_consented" == "true" ]] && DISPATCH_BRIDGE_CONSENTED=true
+                # Mark bridge active for matching workspace
+                local wi
+                for ((wi=0; wi<${#WS_UUIDS[@]}; wi++)); do
+                    [[ "${WS_UUIDS[$wi]}" == "$b_uid" ]] && WS_BRIDGE_ACTIVE[$wi]=true
+                done
+            done <<< "$bridge_keys"
+        fi
+    fi
+
+    # Workspace findings
+    ((${#WS_UUIDS[@]} > 1)) && add_finding "INFO" "Workspaces" "${#WS_UUIDS[@]} workspace(s) detected in Claude Desktop" "org=$WS_ORG_UUID"
+    if [[ "$DISPATCH_BRIDGE_ENABLED" == "true" ]]; then
+        add_finding "WARN" "Cowork Settings" "Dispatch bridge is CONFIGURED — mobile device can dispatch tasks to this desktop" "bridge-state.json: enabled=true, userConsented=$DISPATCH_BRIDGE_CONSENTED"
+    fi
+}
+
 collect_connectors() { # uses SESSION_DIRS, EXT_*, MCP_*
     local -A best_ts best_conn_json
     local sess_dir
@@ -725,6 +851,11 @@ collect_connectors() { # uses SESSION_DIRS, EXT_*, MCP_*
                 for ((di=0; di<${#DISABLED_MCP_TOOLS[@]}; di++)); do [[ "${DISABLED_MCP_TOOLS[$di]}" == "$dk" ]] && { already=true; break; }; done
                 [[ "$already" == "false" ]] && DISABLED_MCP_TOOLS+=("$dk")
             done <<< "$disabled"
+
+            # Dispatch detection (mobile-to-desktop task assignment)
+            local hlm
+            hlm=$(printf '%s' "$data" | jq -r '.hostLoopMode // "null"')
+            [[ "$hlm" == "true" ]] && { DISPATCH_ACTIVE=true; ((DISPATCH_SESSION_COUNT++)); }
 
             local ts rmc_len
             ts=$(printf '%s' "$data" | jq -r '.lastActivityAt // 0')
@@ -827,6 +958,11 @@ collect_connectors() { # uses SESSION_DIRS, EXT_*, MCP_*
         fi
     done
     ((${#DISABLED_MCP_TOOLS[@]} > 0)) && add_finding "INFO" "Cowork Settings" "${#DISABLED_MCP_TOOLS[@]} MCP tool(s) explicitly disabled" "${disabled_dangerous:+Includes dangerous tools: $disabled_dangerous}"
+
+    # Dispatch findings (hostLoopMode = actively accepting; bridge = configured)
+    if [[ "$DISPATCH_ACTIVE" == "true" ]]; then
+        add_finding "WARN" "Cowork Settings" "Dispatch is actively ACCEPTING tasks — phone is remotely triggering desktop tasks" "hostLoopMode=true (${DISPATCH_SESSION_COUNT} session(s))"
+    fi
 }
 
 collect_skills() { # uses SESSION_DIRS, home
@@ -1194,6 +1330,11 @@ build_recommendations() {
     [[ "$EGRESS_UNRESTRICTED" == "true" ]] && \
         RECOMMENDATIONS+=("Cowork VM network egress is unrestricted — all domains reachable")
 
+    [[ "$DISPATCH_ACTIVE" == "true" ]] && \
+        RECOMMENDATIONS+=("Dispatch is actively accepting tasks — mobile device is remotely triggering tasks on this desktop")
+    [[ "$DISPATCH_BRIDGE_ENABLED" == "true" && "$DISPATCH_ACTIVE" != "true" ]] && \
+        RECOMMENDATIONS+=("Dispatch bridge is configured — mobile device can dispatch tasks to this desktop (files, connectors, computer use)")
+
     ((${#HOOK_PLUGINS[@]} > 0)) && \
         RECOMMENDATIONS+=("${#HOOK_PLUGINS[@]} plugin hook(s) execute commands on lifecycle events — review for data exfiltration risk")
 
@@ -1232,7 +1373,7 @@ _sev_color() {
     case "$s" in CRITICAL) _red "$t";; WARN|REVIEW) _yellow "$t";; INFO) _cyan "$t";; OK|PASS) _green "$t";; *) printf '%s' "$t";; esac
 }
 _on_off() {
-    case "$1" in true) _yellow "ON";; false) _green "OFF";; "") _dim "-";; *) printf '%s' "$1";; esac
+    case "$1" in true) _yellow "ON";; false) _green "OFF";; configured) _yellow "CONFIGURED";; "") _dim "-";; *) printf '%s' "$1";; esac
 }
 
 _strip_ansi() { sed $'s/\033\\[[0-9;]*m//g' <<< "$1"; }
@@ -1306,7 +1447,28 @@ BANNER
     for ((i=0;i<${#FINDING_SEV[@]};i++)); do [[ "${FINDING_SEV[$i]}" == "WARN" ]] && ((warn_c++)); [[ "${FINDING_SEV[$i]}" == "REVIEW" ]] && ((rev_c++)); done
     echo "  Scheduled tasks: ${#ST_IDS[@]}  |  MCP servers: ${#MCP_NAMES[@]}  |  Extensions: ${#EXT_NAMES[@]}"
     echo "  Plugins: $n_inst installed, $n_rem remote, $n_cach cached  |  Connectors: $n_web web, $n_nc not connected"
-    echo "  Skills: ${#SK_NAMES[@]}  |  Findings: $warn_c warnings, $rev_c items to review"; echo
+    echo "  Skills: ${#SK_NAMES[@]}  |  Findings: $warn_c warnings, $rev_c items to review"
+    ((${#WS_UUIDS[@]} > 0)) && echo "  Workspaces: ${#WS_UUIDS[@]}  |  Dispatch bridge: $([[ "$DISPATCH_BRIDGE_ENABLED" == "true" ]] && echo "CONFIGURED" || echo "off")"
+    echo
+
+    # Workspaces
+    if ((${#WS_UUIDS[@]} > 1)); then
+        if [[ "$quiet" != "true" ]]; then
+            _section_hdr "WORKSPACES"
+            local rows=""
+            for ((i=0; i<${#WS_UUIDS[@]}; i++)); do
+                [[ -n "$rows" ]] && rows+=$'\n'
+                local uid_short="${WS_UUIDS[$i]:0:8}..."
+                local indicators=""
+                [[ "${WS_DXT_ALLOWLISTS[$i]}" == "true" ]] && indicators="DXT-managed"
+                [[ "${WS_HAS_REMOTE_PLUGINS[$i]}" == "true" ]] && { [[ -n "$indicators" ]] && indicators+=", "; indicators+="org-plugins"; }
+                [[ "${WS_BRIDGE_ACTIVE[$i]}" == "true" ]] && { [[ -n "$indicators" ]] && indicators+=", "; indicators+="dispatch-bridge"; }
+                [[ -z "$indicators" ]] && indicators="-"
+                rows+="$uid_short|${WS_ACCT_NAMES[$i]:-$(_dim "-")}|${WS_EMAILS[$i]:-$(_dim "-")}|${WS_SESSION_COUNTS[$i]}|$indicators"
+            done
+            ascii_table "User UUID|Account|Email|Sessions|Indicators" "$rows" "14|10|26|8|24"; echo
+        fi
+    fi
 
     # Desktop Settings
     local kae="${DESKTOP_PREFS[keepAwakeEnabled]:-false}"
@@ -1329,6 +1491,13 @@ BANNER
         printf '  ccdScheduledTasksEnabled:      %s' "$(_on_off "$ccd")"; [[ "$ccd" == "true" ]] && printf '   ⚠ Code Desktop scheduled tasks'; echo
         printf '  webSearchEnabled:              %s' "$(_on_off "$cws")"; [[ "$cws" == "true" ]] && printf '   ⚠ Autonomous internet access'; echo
         printf '  allowAllBrowserActions:        %s' "$(_on_off "$aba")"; [[ "$aba" == "true" ]] && printf '   ⚠ Browse any website without asking'; echo
+        local dispatch_state="false"
+        [[ "$DISPATCH_BRIDGE_ENABLED" == "true" ]] && dispatch_state="configured"
+        [[ "$DISPATCH_ACTIVE" == "true" ]] && dispatch_state="true"
+        printf '  dispatch (mobile→desktop):    %s' "$(_on_off "$dispatch_state")"
+        if [[ "$DISPATCH_ACTIVE" == "true" ]]; then printf '   ⚠ Actively accepting dispatched tasks'
+        elif [[ "$DISPATCH_BRIDGE_ENABLED" == "true" ]]; then printf '   ⚠ Bridge configured — phone can dispatch tasks'
+        fi; echo
         printf '  networkMode:                   %s\n' "${COWORK_NETWORK_MODE:-$(_dim "-")}"
         if [[ "$EGRESS_UNRESTRICTED" == "true" ]]; then
             printf '  egressAllowedDomains:          %s   ⚠ All domains reachable\n' "$(_on_off true)"
@@ -1350,6 +1519,8 @@ BANNER
         [[ "$ccd" == "true" ]] && wi+=("$(printf '  ccdScheduledTasksEnabled:      %s   ⚠ Code Desktop scheduled tasks' "$(_on_off "$ccd")")")
         [[ "$cws" == "true" ]] && wi+=("$(printf '  webSearchEnabled:              %s   ⚠ Autonomous internet access' "$(_on_off "$cws")")")
         [[ "$aba" == "true" ]] && wi+=("$(printf '  allowAllBrowserActions:        %s   ⚠ Browse any website without asking' "$(_on_off "$aba")")")
+        [[ "$DISPATCH_ACTIVE" == "true" ]] && wi+=("$(printf '  dispatch (mobile→desktop):    %s   ⚠ Actively accepting dispatched tasks' "$(_on_off true)")")
+        [[ "$DISPATCH_BRIDGE_ENABLED" == "true" && "$DISPATCH_ACTIVE" != "true" ]] && wi+=("$(printf '  dispatch (mobile→desktop):    %s   ⚠ Bridge configured — phone can dispatch tasks' "$(_on_off "configured")")")
         [[ "$EGRESS_UNRESTRICTED" == "true" ]] && wi+=("$(printf '  egressAllowedDomains:          %s   ⚠ All domains reachable' "$(_on_off true)")")
         if ((${#wi[@]}>0)); then _section_hdr "COWORK SETTINGS"; for w in "${wi[@]}"; do echo "$w"; done; echo; fi
     fi
@@ -1529,6 +1700,7 @@ _badge_html() {
 }
 _on_off_html() {
     case "$1" in true) echo '<span style="color:#ffc107;font-weight:600">ON</span>';; false) echo '<span style="color:#28a745">OFF</span>';;
+        configured) echo '<span style="color:#ffc107;font-weight:600">CONFIGURED</span>';;
         "") echo '<span style="color:#666">-</span>';; *) _h "$1";; esac
 }
 
@@ -1570,8 +1742,25 @@ code{background:rgba(233,69,96,0.15);padding:2px 6px;border-radius:3px;font-size
 <div>Scheduled tasks: <strong>${#ST_IDS[@]}</strong> &bull; MCP servers: <strong>${#MCP_NAMES[@]}</strong> &bull; Extensions: <strong>${#EXT_NAMES[@]}</strong></div>
 <div>Plugins: <strong>${n_inst}</strong> installed, <strong>${n_rem}</strong> remote, <strong>${n_cach}</strong> cached &bull; Connectors: <strong>${n_web}</strong> web, <strong>${n_nc}</strong> not connected &bull; Skills: <strong>${#SK_NAMES[@]}</strong></div>
 <div style="margin-top:5px;">$(_badge_html "WARN") ${warn_c} warnings &nbsp; $(_badge_html "REVIEW") ${rev_c} items to review</div>
+$( ((${#WS_UUIDS[@]} > 0)) && echo "<div>Workspaces: <strong>${#WS_UUIDS[@]}</strong> &bull; Dispatch bridge: <strong>$([[ "$DISPATCH_BRIDGE_ENABLED" == "true" ]] && echo "CONFIGURED" || echo "off")</strong></div>" )
 </div>
 HTMLEOF
+
+    # Workspaces
+    if ((${#WS_UUIDS[@]} > 1)) && [[ "$quiet" != "true" ]]; then
+        echo '<details open><summary>Workspaces</summary><div class="detail-content">'
+        echo '<table><tr><th>User UUID</th><th>Account</th><th>Email</th><th>Sessions</th><th>Indicators</th></tr>'
+        for ((i=0; i<${#WS_UUIDS[@]}; i++)); do
+            local html_ind=""
+            [[ "${WS_DXT_ALLOWLISTS[$i]}" == "true" ]] && html_ind="DXT-managed"
+            [[ "${WS_HAS_REMOTE_PLUGINS[$i]}" == "true" ]] && { [[ -n "$html_ind" ]] && html_ind+=", "; html_ind+="org-plugins"; }
+            [[ "${WS_BRIDGE_ACTIVE[$i]}" == "true" ]] && { [[ -n "$html_ind" ]] && html_ind+=", "; html_ind+="dispatch-bridge"; }
+            [[ -z "$html_ind" ]] && html_ind="-"
+            printf '<tr><td><code>%s...</code></td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>\n' \
+                "$(_h "${WS_UUIDS[$i]:0:8}")" "$(_h "${WS_ACCT_NAMES[$i]:-"-"}")" "$(_h "${WS_EMAILS[$i]:-"-"}")" "${WS_SESSION_COUNTS[$i]}" "$(_h "$html_ind")"
+        done
+        echo '</table></div></details>'
+    fi
 
     # Desktop Settings
     local kae="${DESKTOP_PREFS[keepAwakeEnabled]:-false}"
@@ -1600,6 +1789,13 @@ HTMLEOF
             printf '<div class="setting-row"><span class="setting-key">%s</span><span class="setting-val">%s</span>' "$(_h "$label")" "$(_on_off_html "$val")"
             [[ "$val" == "true" ]] && printf '<span class="setting-warn">&#9888; %s</span>' "$(_h "$wmsg")"; echo '</div>'
         done
+        local html_dispatch_state="false"
+        [[ "$DISPATCH_BRIDGE_ENABLED" == "true" ]] && html_dispatch_state="configured"
+        [[ "$DISPATCH_ACTIVE" == "true" ]] && html_dispatch_state="true"
+        printf '<div class="setting-row"><span class="setting-key">dispatch (mobile&#8594;desktop)</span><span class="setting-val">%s</span>' "$(_on_off_html "$html_dispatch_state")"
+        if [[ "$DISPATCH_ACTIVE" == "true" ]]; then printf '<span class="setting-warn">&#9888; Actively accepting dispatched tasks</span>'
+        elif [[ "$DISPATCH_BRIDGE_ENABLED" == "true" ]]; then printf '<span class="setting-warn">&#9888; Bridge configured — phone can dispatch tasks</span>'
+        fi; echo '</div>'
         printf '<div class="setting-row"><span class="setting-key">networkMode</span><span class="setting-val">%s</span></div>\n' "$(_h "${COWORK_NETWORK_MODE:-"-"}")"
         if [[ "$EGRESS_UNRESTRICTED" == "true" ]]; then
             printf '<div class="setting-row"><span class="setting-key">egressAllowedDomains</span><span class="setting-val">%s</span><span class="setting-warn">&#9888; All domains reachable</span></div>\n' "$(_on_off_html true)"
@@ -1610,7 +1806,7 @@ HTMLEOF
         ((${#COWORK_ENABLED_PLUGINS[@]}>0)) && printf '<div class="setting-row"><span class="setting-key">Enabled plugins</span><span class="setting-val">%s</span></div>\n' "$(_h "$(IFS=', '; echo "${COWORK_ENABLED_PLUGINS[*]}")")"
         echo '</div></details>'
     else
-        if [[ "$cst" == "true" || "$ccd" == "true" || "$cws" == "true" || "$aba" == "true" || "$EGRESS_UNRESTRICTED" == "true" ]]; then
+        if [[ "$cst" == "true" || "$ccd" == "true" || "$cws" == "true" || "$aba" == "true" || "$DISPATCH_ACTIVE" == "true" || "$DISPATCH_BRIDGE_ENABLED" == "true" || "$EGRESS_UNRESTRICTED" == "true" ]]; then
             echo '<details open><summary>Cowork Settings</summary><div class="detail-content">'
             for tuple in "coworkScheduledTasksEnabled|scheduledTasksEnabled|Autonomous task execution" \
                          "ccdScheduledTasksEnabled|ccdScheduledTasksEnabled|Code Desktop scheduled tasks" \
@@ -1619,6 +1815,8 @@ HTMLEOF
                 IFS='|' read -r key label wmsg <<< "$tuple"
                 [[ "${COWORK_PREFS[$key]:-false}" == "true" ]] && printf '<div class="setting-row"><span class="setting-key">%s</span><span class="setting-val">%s</span><span class="setting-warn">&#9888; %s</span></div>\n' "$(_h "$label")" "$(_on_off_html true)" "$(_h "$wmsg")"
             done
+            [[ "$DISPATCH_ACTIVE" == "true" ]] && printf '<div class="setting-row"><span class="setting-key">dispatch (mobile&#8594;desktop)</span><span class="setting-val">%s</span><span class="setting-warn">&#9888; Actively accepting dispatched tasks</span></div>\n' "$(_on_off_html true)"
+            [[ "$DISPATCH_BRIDGE_ENABLED" == "true" && "$DISPATCH_ACTIVE" != "true" ]] && printf '<div class="setting-row"><span class="setting-key">dispatch (mobile&#8594;desktop)</span><span class="setting-val">%s</span><span class="setting-warn">&#9888; Bridge configured — phone can dispatch tasks</span></div>\n' "$(_on_off_html configured)"
             [[ "$EGRESS_UNRESTRICTED" == "true" ]] && printf '<div class="setting-row"><span class="setting-key">egressAllowedDomains</span><span class="setting-val">%s</span><span class="setting-warn">&#9888; All domains reachable</span></div>\n' "$(_on_off_html true)"
             echo '</div></details>'
         fi
@@ -1807,7 +2005,12 @@ render_json() {
     done; ext_j+="]"
 
     local dp_j="{\"keepAwakeEnabled\":${DESKTOP_PREFS[keepAwakeEnabled]:-false},\"menuBarEnabled\":${DESKTOP_PREFS[menuBarEnabled]:-false}}"
-    local cp_j="{\"coworkScheduledTasksEnabled\":${COWORK_PREFS[coworkScheduledTasksEnabled]:-false},\"ccdScheduledTasksEnabled\":${COWORK_PREFS[ccdScheduledTasksEnabled]:-false},\"coworkWebSearchEnabled\":${COWORK_PREFS[coworkWebSearchEnabled]:-false},\"allowAllBrowserActions\":${COWORK_PREFS[allowAllBrowserActions]:-false}}"
+    local cp_j="{\"coworkScheduledTasksEnabled\":${COWORK_PREFS[coworkScheduledTasksEnabled]:-false},\"ccdScheduledTasksEnabled\":${COWORK_PREFS[ccdScheduledTasksEnabled]:-false},\"coworkWebSearchEnabled\":${COWORK_PREFS[coworkWebSearchEnabled]:-false},\"allowAllBrowserActions\":${COWORK_PREFS[allowAllBrowserActions]:-false},\"dispatchActive\":${DISPATCH_ACTIVE},\"dispatchSessionCount\":${DISPATCH_SESSION_COUNT},\"dispatchBridgeEnabled\":${DISPATCH_BRIDGE_ENABLED},\"dispatchBridgeConsented\":${DISPATCH_BRIDGE_CONSENTED}}"
+
+    local ws_j="["; for ((i=0;i<${#WS_UUIDS[@]};i++)); do ((i>0)) && ws_j+=","
+        local ws_dxt="${WS_DXT_ALLOWLISTS[$i]:-false}"; [[ "$ws_dxt" != "true" ]] && ws_dxt="false"
+        ws_j+="{\"userUuid\":$(_jstr "${WS_UUIDS[$i]}"),\"accountName\":$(_jstr "${WS_ACCT_NAMES[$i]}"),\"email\":$(_jstr "${WS_EMAILS[$i]}"),\"sessionCount\":${WS_SESSION_COUNTS[$i]:-0},\"dxtAllowlistEnabled\":${ws_dxt},\"hasRemotePlugins\":${WS_HAS_REMOTE_PLUGINS[$i]:-false},\"bridgeActive\":${WS_BRIDGE_ACTIVE[$i]:-false}}"
+    done; ws_j+="]"
 
     local egress_j
     if [[ "$EGRESS_UNRESTRICTED" == "true" ]]; then egress_j='["*"]'
@@ -1826,12 +2029,13 @@ render_json() {
         hook_j+="{\"plugin\":$(_jstr "${HOOK_PLUGINS[$i]}"),\"event\":$(_jstr "${HOOK_EVENTS[$i]}"),\"command\":$(_jstr "${HOOK_CMDS[$i]}")}"
     done; hook_j+="]"
 
-    printf '{"timestamp":%s,"hostname":%s,"username":%s,"home_dir":%s,"findings":%s,"desktop_prefs":%s,"cowork_prefs":%s,"cowork_network_mode":%s,"egress_allowed_domains":%s,"disabled_mcp_tools":%s,"plugin_hooks":%s,"mcp_servers":%s,"plugins":%s,"connectors":%s,"skills":%s,"scheduled_tasks":%s,"extensions":%s,"blocklist_entries":%d,"blocklist_status":%s,"claude_code_settings":%s,"warn_count":%d,"info_count":%d}' \
+    printf '{"timestamp":%s,"hostname":%s,"username":%s,"home_dir":%s,"findings":%s,"desktop_prefs":%s,"cowork_prefs":%s,"cowork_network_mode":%s,"egress_allowed_domains":%s,"disabled_mcp_tools":%s,"plugin_hooks":%s,"mcp_servers":%s,"plugins":%s,"connectors":%s,"skills":%s,"scheduled_tasks":%s,"extensions":%s,"blocklist_entries":%d,"blocklist_status":%s,"claude_code_settings":%s,"workspaces":%s,"org_uuid":%s,"warn_count":%d,"info_count":%d}' \
         "$(_jstr "$TIMESTAMP")" "$(_jstr "$HOSTNAME_VAL")" "$(_jstr "$AUDIT_USER")" "$(_jstr "$HOME_DIR")" \
         "$findings_j" "$dp_j" "$cp_j" "$(_jstr "$COWORK_NETWORK_MODE")" \
         "$egress_j" "$dtool_j" "$hook_j" \
         "$mcp_j" "$plg_j" "$conn_j" "$sk_j" "$st_j" "$ext_j" \
         "$BLOCKLIST_ENTRIES" "$(_jstr "$BLOCKLIST_STATUS")" "$CLAUDE_CODE_JSON" \
+        "$ws_j" "$(_jstr "$WS_ORG_UUID")" \
         "$WARN_COUNT" "$INFO_COUNT" | \
     jq 'def redact_val: if type=="string" and test("(sk-[a-zA-Z0-9]{20,}|://[^@\\s]+@)";"x") then "[REDACTED]" else . end; def redact: if type=="object" then to_entries|map(if .key|test("oauth|token|tokenCache|secret|password|credential|apiKey|api_key|access_token|refresh_token|private_key|privateKey";"i") then .value="[REDACTED]" else .value=(.value|redact) end)|from_entries elif type=="array" then map(redact) elif type=="string" then redact_val else . end; redact'
 }
@@ -1850,6 +2054,10 @@ run_audit() {
     PLG_IDS=(); PLG_SKILL_COUNTS=(); MARKETPLACE_AVAILABLE=()
     CONN_NAMES=(); CONN_CATS=(); CONN_TOOLS=(); CONN_TAGS=()
     EGRESS_DOMAINS=""; EGRESS_UNRESTRICTED=false; DISABLED_MCP_TOOLS=()
+    DISPATCH_SESSION_COUNT=0; DISPATCH_ACTIVE=false
+    DISPATCH_BRIDGE_ENABLED=false; DISPATCH_BRIDGE_CONSENTED=false
+    WS_UUIDS=(); WS_ACCT_NAMES=(); WS_EMAILS=(); WS_SESSION_COUNTS=()
+    WS_DXT_ALLOWLISTS=(); WS_HAS_REMOTE_PLUGINS=(); WS_BRIDGE_ACTIVE=(); WS_ORG_UUID=""
     HOOK_PLUGINS=(); HOOK_EVENTS=(); HOOK_CMDS=()
     SK_NAMES=(); SK_DESCS=(); SK_SRCS=(); SK_PLUGINS=(); SK_PATHS=()
     ST_IDS=(); ST_CRONS=(); ST_CRON_ENG=(); ST_ENABLEDS=(); ST_FPATHS=()
@@ -1873,6 +2081,7 @@ run_audit() {
     collect_plugins
     collect_plugin_hooks "$home"
     collect_connectors
+    collect_workspaces "$claude_dir"
     collect_skills "$home"
     collect_scheduled_tasks
     collect_blocklist "$claude_dir"

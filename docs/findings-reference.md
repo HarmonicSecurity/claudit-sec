@@ -23,9 +23,10 @@
 13. [⏰ Scheduled Tasks](#13--scheduled-tasks)
 14. [⚙️ App Config (config.json)](#14--app-config-configjson)
 15. [💻 Claude Code Settings](#15--claude-code-settings)
-16. [🏃 Runtime State](#16--runtime-state)
-17. [🍪 Cookies](#17--cookies)
-18. [📊 Severity Level Reference](#18--severity-level-reference)
+16. [🏛️ Claude Code Managed Policy (Windows)](#16--claude-code-managed-policy-windows)
+17. [🏃 Runtime State](#17--runtime-state)
+18. [🍪 Cookies](#18--cookies)
+19. [📊 Severity Level Reference](#19--severity-level-reference)
 
 ---
 
@@ -584,7 +585,72 @@ Claude Code is the CLI-based Claude interface. Its settings file contains permis
 
 ---
 
-## 16. 🏃 Runtime State
+## 16. 🏛️ Claude Code Managed Policy (Windows)
+
+**Source files:** `managed-mcp.json`, `managed-settings.json`, `managed-settings.d\*.json`
+**Windows paths (current, Claude Code v2.1.75+):**
+- `%PROGRAMFILES%\ClaudeCode\managed-mcp.json`
+- `%PROGRAMFILES%\ClaudeCode\managed-settings.json`
+- `%PROGRAMFILES%\ClaudeCode\managed-settings.d\*.json` (drop-in policy fragments, merged systemd-style)
+
+**Windows paths (legacy, deprecated as of v2.1.75):**
+- `%PROGRAMDATA%\ClaudeCode\managed-mcp.json`
+- `%PROGRAMDATA%\ClaudeCode\managed-settings.json`
+
+These files are written by enterprise administrators (typically via MDM, Group Policy, or an installer) to push MCP servers and Claude Code policy settings to every user on a Windows host. Unlike `~/.claude/settings.json` (which is per-user, user-writable), the managed-policy files live in admin-only locations and apply globally. Claude Code v2.1.75 dropped support for the legacy `%PROGRAMDATA%` location and now only honors `%PROGRAMFILES%\ClaudeCode\`. CLAUDIT scans both paths so administrators can verify the new location is populated **and** get warned when stale policy files remain in the legacy location after the upgrade.
+
+This collector runs only on Windows (the macOS shell script has no equivalent — Anthropic doesn't ship a managed-policy mechanism for Claude Code on macOS).
+
+---
+
+### 🏛️ Managed MCP Servers Deployed (current path)
+
+- **What**: For each `mcpServers` entry in `%PROGRAMFILES%\ClaudeCode\managed-mcp.json`, CLAUDIT captures the server name, command, arguments (with secrets redacted), environment variable names (values never captured), and tags it with `source: "programfiles"`. A summary finding reports the count of managed MCP servers deployed via this file.
+- **Why it matters**:
+  - 🔴 **Risk**: Managed MCP servers are MCP processes that Claude Code launches with the user's full permissions on every Windows host the policy is applied to. Unlike user-installed MCP servers (which the user explicitly added), these are pushed centrally — a compromised admin tool, signed installer, or policy-deployment pipeline could ship a malicious MCP server to every endpoint at once. Argument values matching `sk-`, `key=`, `token=`, `secret=`, or `password=` patterns are auto-redacted in the report.
+  - 📜 **Compliance**: Centrally deployed MCP servers should be inventoried as part of software asset management. Each server is third-party code execution that needs to be approved through the standard software change-control process.
+  - 🤖 **AI enablement**: This is the org-blessed set of MCP capabilities for Claude Code. Knowing what's in the file shows administrators what their fleet's baseline AI capability set looks like.
+- **Severity**: ℹ️ `INFO` — Managed deployment is the expected mechanism; the inventory is presented for review.
+- **Recommendation**: Verify each managed MCP server is on the organization's approved list. Confirm the deployment source (MDM, installer, Group Policy) is the legitimate one. Review env var names to confirm credentials are appropriate.
+
+---
+
+### 📜 Managed Settings Present (current path)
+
+- **What**: For each `managed-settings.json` file (and any `managed-settings.d\*.json` drop-in fragment) found under `%PROGRAMFILES%\ClaudeCode\`, CLAUDIT lists the top-level keys observed (e.g., `permissions`, `model`, `egressAllowedDomains`).
+- **Why it matters**:
+  - 🔍 **Visibility**: Managed-settings files override user-level `~/.claude/settings.json` and define org-wide Claude Code policy: permission allow/deny rules, model pinning, network egress allowlists, etc. Knowing which keys are set tells you what dimensions of Claude Code behavior the org is controlling.
+  - 📜 **Compliance**: Managed-policy files are the equivalent of Group Policy / MDM configuration profiles for Claude Code. They should be documented as part of the org's endpoint configuration baseline.
+  - 🤖 **AI enablement**: This is where org-wide Claude Code constraints live (e.g., "all users must use Sonnet, may not use Bash(*)"). The inventory shows which constraints are actually deployed.
+- **Severity**: ℹ️ `INFO` — Managed settings are expected on managed fleets; the key list is informational.
+- **Recommendation**: Verify the deployed key set matches the documented org policy. If a key is missing that you expected, the policy file may have been overwritten or never reached the host.
+
+---
+
+### 📁 Drop-In Policy Fragments
+
+- **What**: Counts the number of `*.json` files in `%PROGRAMFILES%\ClaudeCode\managed-settings.d\`. These fragments are merged on top of `managed-settings.json` in lexical order — the same convention systemd uses for `*.conf.d/` directories, allowing multiple admin tools to ship policy slices independently without coordinating edits to a single file.
+- **Why it matters**:
+  - 🔍 **Visibility**: Multiple admin tools (e.g., a base policy installer + a per-team overlay) may each write their own fragment. Knowing how many fragments exist helps reason about merge order and identify unexpected overlays.
+  - 🤖 **AI enablement**: Fragments are the modern mechanism for layering policy. Their presence indicates the org is using a structured policy-management approach.
+- **Severity**: ℹ️ `INFO` — Informational. Each fragment also generates the per-file "Managed settings present" finding above.
+- **Recommendation**: Review the fragment list and verify each one is from an approved deployment tool. An unexpected fragment may indicate an unauthorized policy push.
+
+---
+
+### ⚠️ Managed Policy Files Present in Legacy Path
+
+- **What**: If any `managed-mcp.json` or `managed-settings.json` is found under `%PROGRAMDATA%\ClaudeCode\`, CLAUDIT emits a per-file `WARN` finding (matching the inventory above but with `source: "programdata"` in the JSON output) **and** a top-level `WARN` summarizing all legacy paths discovered with a migration hint pointing at `%PROGRAMFILES%\ClaudeCode\`.
+- **Why it matters**:
+  - 🔴 **Risk**: As of Claude Code v2.1.75, the legacy `%PROGRAMDATA%\ClaudeCode\` path is **no longer honored**. Any policy still sitting there is effectively dormant — Claude Code will not read it. The org thinks they have a policy in place; in reality they do not. This is exactly the kind of silent control failure that compliance audits are supposed to catch.
+  - 📜 **Compliance**: A stale policy file is worse than no policy at all because it gives administrators false confidence. Migrating to the new location should be tracked as a discrete remediation task.
+  - 🤖 **AI enablement**: If managed MCP servers were defined in the legacy file but never migrated, those capabilities have silently disappeared from every endpoint that upgraded past v2.1.75.
+- **Severity**: ⚠️ `WARN` — A stale legacy policy file represents a silent control failure that needs remediation.
+- **Recommendation**: Move the file's contents to `%PROGRAMFILES%\ClaudeCode\` (preserving any per-fragment splitting under `managed-settings.d\`), confirm the new location is being read by Claude Code (test on one host first), then delete the legacy file from `%PROGRAMDATA%\ClaudeCode\`. Update any deployment tooling (MSI installers, MDM scripts, Group Policy preferences) that still targets the legacy path.
+
+---
+
+## 17. 🏃 Runtime State
 
 **Source:** System commands (`pgrep`, `pmset`, `crontab`, filesystem)
 **Windows note:** On Windows, runtime checks use `Get-Process` instead of `pgrep`, `schtasks`/Task Scheduler instead of `crontab`, and the Startup folder (`shell:startup`) instead of LaunchAgents. Power management assertion checks (`pmset`) are macOS-only.
@@ -652,7 +718,7 @@ Runtime checks examine the live state of the system to detect Claude-related pro
 
 ---
 
-## 17. 🍪 Cookies
+## 18. 🍪 Cookies
 
 **Source files:** `~/Library/Application Support/Claude/Cookies`, `~/Library/Application Support/Claude/Cookies-journal`
 **Windows paths:** `%APPDATA%\Claude\Cookies`, `%APPDATA%\Claude\Cookies-journal`
@@ -672,7 +738,7 @@ Claude Desktop (as an Electron app) maintains browser-like cookie storage.
 
 ---
 
-## 18. 📊 Severity Level Reference
+## 19. 📊 Severity Level Reference
 
 CLAUDIT uses five severity levels. Here is what each means and when it is applied:
 
@@ -710,6 +776,9 @@ Here is a complete catalog of every `add_finding` call in CLAUDIT, organized by 
 | 16 | Runtime | Debug directory is large | `~/Library/Application Support/Claude/debug/` exceeds 100 MB |
 | 17 | Dispatch | Dispatch bridge CONFIGURED | `bridge-state.json` has any entry with `enabled: true` |
 | 18 | Dispatch | Dispatch actively accepting tasks | Any `local_*.json` has `hostLoopMode: true` |
+| 19 | Managed Policy | Managed MCP servers in legacy path | `mcpServers` entries found in `%PROGRAMDATA%\ClaudeCode\managed-mcp.json` (Windows; no longer honored as of Claude Code v2.1.75) |
+| 20 | Managed Policy | Managed settings in legacy path | `managed-settings.json` found in `%PROGRAMDATA%\ClaudeCode\` (Windows; no longer honored as of Claude Code v2.1.75) |
+| 21 | Managed Policy | Legacy %PROGRAMDATA% path migration hint | Any managed-policy file present under `%PROGRAMDATA%\ClaudeCode\` (Windows; one summary finding regardless of file count) |
 
 ### 🔍 REVIEW Findings
 
@@ -727,6 +796,9 @@ Here is a complete catalog of every `add_finding` call in CLAUDIT, organized by 
 | 4 | Claude Code | Permissions granted | `permissions.allow` array is non-empty in `~/.claude/settings.json` |
 | 5 | Runtime | Claude is running | `pgrep -fl Claude` returns results |
 | 6 | Workspaces | Multiple workspaces detected | More than 1 workspace (user UUID) found across session directories and config keys |
+| 7 | Managed Policy | Managed MCP servers deployed | `mcpServers` entries found in `%PROGRAMFILES%\ClaudeCode\managed-mcp.json` (Windows) |
+| 8 | Managed Policy | Managed settings present | `managed-settings.json` or `managed-settings.d\*.json` fragment found under `%PROGRAMFILES%\ClaudeCode\` (Windows) |
+| 9 | Managed Policy | Drop-in policy fragments | Any `*.json` file in `%PROGRAMFILES%\ClaudeCode\managed-settings.d\` (Windows) |
 
 ---
 
@@ -750,6 +822,7 @@ The following data is collected and displayed in the report but does **not** gen
 | Disabled MCP Tools | Per-session disabled tool list with dangerous tool callout | Tool restriction inventory |
 | Workspaces | Workspace table (user UUID, account name, email, session count, indicators) | Multi-account inventory |
 | Dispatch | Three-state display (OFF/CONFIGURED/ON) | Mobile-to-desktop bridge state |
+| Managed Policy | Per-server inventory under `managed_policy.managed_mcp` (name, command, args, env keys, source) and `managed_policy.settings_keys` in JSON output | Org-deployed Claude Code policy + MCP inventory (Windows) |
 | Cookies | Cookie file presence | Artifact inventory |
 
 ---
@@ -776,4 +849,4 @@ CLAUDIT also builds a **Recommendations** list at the end of the report. Recomme
 
 ---
 
-*This document was generated for CLAUDIT-SEC v2.3.0. Last updated: 2026-04-02.*
+*This document was generated for CLAUDIT-SEC v2.3.0. Last updated: 2026-05-12.*

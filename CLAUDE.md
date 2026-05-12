@@ -35,6 +35,7 @@ The script follows this structure:
 | Extension Settings | `Claude Extensions Settings/*.json` | Allowed directories |
 | Blocklist | `extensions-blocklist.json` | Governance control presence |
 | Claude Code Settings | `~/.claude/settings.json` | Permission grants |
+| Claude Code Managed Policy (Windows) | `%PROGRAMFILES%\ClaudeCode\managed-{mcp,settings}.json`, `managed-settings.d\*.json`, legacy `%PROGRAMDATA%\ClaudeCode\` | Admin-deployed MCP servers + policy; WARN on legacy %PROGRAMDATA% path (no longer honored as of Claude Code v2.1.75) |
 | Runtime | pgrep, pmset, crontab, LaunchAgents | Running processes, sleep assertions |
 | Cookies | `Cookies`, `Cookies-journal` | Presence and permissions |
 

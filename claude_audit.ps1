@@ -161,6 +161,18 @@ $script:BlocklistEntries = 0
 $script:BlocklistStatus  = ""
 $script:ClaudeCodeJson  = $null
 
+# Claude Code Managed Policy (Windows admin-deployed policy + MCP)
+# Sources: %PROGRAMFILES%\ClaudeCode (current, v2.1.75+) and %PROGRAMDATA%\ClaudeCode (legacy)
+$script:ManagedPolicyFiles      = [System.Collections.Generic.List[string]]::new()  # absolute paths read
+$script:ManagedPolicyLegacy     = [System.Collections.Generic.List[string]]::new()  # legacy %PROGRAMDATA% paths read
+$script:ManagedMcpNames         = [System.Collections.Generic.List[string]]::new()
+$script:ManagedMcpCmds          = [System.Collections.Generic.List[string]]::new()
+$script:ManagedMcpArgsStr       = [System.Collections.Generic.List[string]]::new()
+$script:ManagedMcpEnvKeys       = [System.Collections.Generic.List[string]]::new()
+$script:ManagedMcpSources       = [System.Collections.Generic.List[string]]::new()  # 'programfiles' | 'programdata'
+$script:ManagedSettingsKeys     = [System.Collections.Generic.List[string]]::new()  # top-level keys observed
+$script:ManagedSettingsLegacyHit = $false                                            # any file found in legacy path
+
 # Skill frontmatter parse results (set by Parse-SkillFrontmatter)
 $script:SkillFmName = ""
 $script:SkillFmDesc = ""
@@ -762,6 +774,16 @@ function Reset-AuditState {
     $script:BlocklistEntries = 0
     $script:BlocklistStatus  = ""
     $script:ClaudeCodeJson  = $null
+
+    $script:ManagedPolicyFiles.Clear()
+    $script:ManagedPolicyLegacy.Clear()
+    $script:ManagedMcpNames.Clear()
+    $script:ManagedMcpCmds.Clear()
+    $script:ManagedMcpArgsStr.Clear()
+    $script:ManagedMcpEnvKeys.Clear()
+    $script:ManagedMcpSources.Clear()
+    $script:ManagedSettingsKeys.Clear()
+    $script:ManagedSettingsLegacyHit = $false
 
     $script:Recommendations.Clear()
 
@@ -2624,7 +2646,128 @@ function Collect-ClaudeCodeSettings {
 }
 
 # ============================================================================
-# 14. Collect-Runtime (Windows-specific)
+# 14. Collect-ClaudeCodeManagedPolicy (Windows admin-deployed policy + MCP)
+# ============================================================================
+# Reads the system-wide Claude Code policy files written by enterprise admins:
+#   - managed-mcp.json       : MCP servers pushed to all users
+#   - managed-settings.json  : policy / setting overrides
+#   - managed-settings.d\*.json : drop-in policy fragments (new path only)
+#
+# Claude Code v2.1.75 dropped support for the legacy %PROGRAMDATA%\ClaudeCode
+# location and now only honors %PROGRAMFILES%\ClaudeCode. We scan both so we
+# can warn when stale files remain in the legacy location after the upgrade.
+function Collect-ClaudeCodeManagedPolicy {
+    $programFiles = if ($env:ProgramFiles) { $env:ProgramFiles } else { 'C:\Program Files' }
+    $programData  = if ($env:ProgramData)  { $env:ProgramData }  else { 'C:\ProgramData' }
+
+    $newRoot    = Join-Path $programFiles 'ClaudeCode'
+    $legacyRoot = Join-Path $programData  'ClaudeCode'
+
+    # Single helper that processes one managed-mcp.json or managed-settings.json file.
+    function _process_managed_file {
+        param(
+            [string]$Path,
+            [string]$Kind,    # 'mcp' or 'settings'
+            [string]$Source   # 'programfiles' or 'programdata'
+        )
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return }
+
+        $script:ManagedPolicyFiles.Add($Path)
+        if ($Source -eq 'programdata') {
+            $script:ManagedPolicyLegacy.Add($Path)
+            $script:ManagedSettingsLegacyHit = $true
+        }
+
+        $data = Read-SafeJson $Path
+        if ($script:JsonError) {
+            if ($script:JsonError -ne 'ABSENT') {
+                Add-Finding 'INFO' 'Managed Policy' "$(Split-Path $Path -Leaf): [$($script:JsonError)]" $Path
+            }
+            return
+        }
+        if (-not $data) { return }
+
+        if ($Kind -eq 'mcp') {
+            $mcpJson = $null
+            if ($data.PSObject.Properties['mcpServers']) { $mcpJson = $data.mcpServers }
+            if (-not $mcpJson) { return }
+
+            $count = 0
+            $mcpJson.PSObject.Properties | ForEach-Object {
+                $sname = $_.Name
+                $srv   = $_.Value
+
+                $cmd = Get-JsonProp $srv 'command' '[unknown]'
+
+                $argsArr = @()
+                if ($srv.PSObject.Properties['args'] -and $srv.args -is [array]) {
+                    $argsArr = $srv.args | ForEach-Object { Redact-Arg "$_" }
+                }
+                $argsStr = $argsArr -join ' '
+
+                $envKeys = '-'
+                if ($srv.PSObject.Properties['env'] -and $srv.env) {
+                    $keys = @($srv.env.PSObject.Properties | ForEach-Object { $_.Name })
+                    if ($keys.Count -gt 0) { $envKeys = $keys -join ', ' }
+                }
+
+                $script:ManagedMcpNames    += $sname
+                $script:ManagedMcpCmds     += $cmd
+                $script:ManagedMcpArgsStr  += $argsStr
+                $script:ManagedMcpEnvKeys  += $envKeys
+                $script:ManagedMcpSources  += $Source
+                $count++
+            }
+
+            if ($count -gt 0) {
+                $sev = if ($Source -eq 'programdata') { 'WARN' } else { 'INFO' }
+                $msg = "$count managed MCP server(s) deployed via $Path"
+                Add-Finding $sev 'Managed Policy' $msg
+            }
+        }
+        elseif ($Kind -eq 'settings') {
+            $keys = @($data.PSObject.Properties | ForEach-Object { $_.Name })
+            foreach ($k in $keys) {
+                if ($script:ManagedSettingsKeys -notcontains $k) {
+                    $script:ManagedSettingsKeys += $k
+                }
+            }
+            if ($keys.Count -gt 0) {
+                $sev = if ($Source -eq 'programdata') { 'WARN' } else { 'INFO' }
+                Add-Finding $sev 'Managed Policy' "Managed settings present in $Path" "Top-level keys: $($keys -join ', ')"
+            }
+        }
+    }
+
+    # Current location (v2.1.75+)
+    _process_managed_file -Path (Join-Path $newRoot 'managed-mcp.json')      -Kind 'mcp'      -Source 'programfiles'
+    _process_managed_file -Path (Join-Path $newRoot 'managed-settings.json') -Kind 'settings' -Source 'programfiles'
+
+    # Drop-in policy fragments (new location only - systemd-style merge)
+    $dropInDir = Join-Path $newRoot 'managed-settings.d'
+    if (Test-Path -LiteralPath $dropInDir -PathType Container) {
+        $fragments = @(Get-ChildItem -LiteralPath $dropInDir -Filter '*.json' -File -ErrorAction SilentlyContinue |
+                       Sort-Object Name)
+        foreach ($f in $fragments) {
+            _process_managed_file -Path $f.FullName -Kind 'settings' -Source 'programfiles'
+        }
+        if ($fragments.Count -gt 0) {
+            Add-Finding 'INFO' 'Managed Policy' "$($fragments.Count) policy fragment(s) in managed-settings.d\" $dropInDir
+        }
+    }
+
+    # Legacy location (deprecated as of Claude Code v2.1.75 - no longer honored)
+    _process_managed_file -Path (Join-Path $legacyRoot 'managed-mcp.json')      -Kind 'mcp'      -Source 'programdata'
+    _process_managed_file -Path (Join-Path $legacyRoot 'managed-settings.json') -Kind 'settings' -Source 'programdata'
+
+    if ($script:ManagedSettingsLegacyHit) {
+        $detail = "Files remain in legacy location: $($script:ManagedPolicyLegacy -join '; '). Migrate to $newRoot\."
+        Add-Finding 'WARN' 'Managed Policy' 'Managed policy files present in legacy %PROGRAMDATA% path - no longer honored as of Claude Code v2.1.75' $detail
+    }
+}
+
+# ============================================================================
+# 15. Collect-Runtime (Windows-specific)
 # ============================================================================
 function Collect-Runtime {
     param([string]$ClaudeDir, [string]$HomeDir)
@@ -4046,6 +4189,31 @@ function Render-Json {
     # Claude Code settings - already a PSCustomObject from Read-SafeJson
     $claudeCodeObj = if ($script:ClaudeCodeJson) { $script:ClaudeCodeJson } else { [PSCustomObject]@{} }
 
+    # Managed policy (admin-deployed managed-mcp.json / managed-settings.json)
+    $managedMcp = [System.Collections.Generic.List[object]]::new()
+    for ($i = 0; $i -lt $script:ManagedMcpNames.Count; $i++) {
+        [void]$managedMcp.Add([ordered]@{
+            name     = $script:ManagedMcpNames[$i]
+            command  = $script:ManagedMcpCmds[$i]
+            args     = $script:ManagedMcpArgsStr[$i]
+            env_keys = $script:ManagedMcpEnvKeys[$i]
+            source   = $script:ManagedMcpSources[$i]
+        })
+    }
+    $mpFiles  = [System.Collections.Generic.List[object]]::new()
+    foreach ($p in $script:ManagedPolicyFiles)  { [void]$mpFiles.Add($p) }
+    $mpLegacy = [System.Collections.Generic.List[object]]::new()
+    foreach ($p in $script:ManagedPolicyLegacy) { [void]$mpLegacy.Add($p) }
+    $mpKeys   = [System.Collections.Generic.List[object]]::new()
+    foreach ($k in $script:ManagedSettingsKeys) { [void]$mpKeys.Add($k) }
+    $managedPolicy = [ordered]@{
+        files_found        = $mpFiles
+        legacy_paths_found = $mpLegacy
+        legacy_path_in_use = [bool]$script:ManagedSettingsLegacyHit
+        managed_mcp        = $managedMcp
+        settings_keys      = $mpKeys
+    }
+
     # Home directory
     $homeDir = if ($script:AuditUser) {
         "C:\Users\$($script:AuditUser)"
@@ -4075,6 +4243,7 @@ function Render-Json {
         blocklist_entries     = [int]$script:BlocklistEntries
         blocklist_status      = $(if ($script:BlocklistStatus) { $script:BlocklistStatus } else { '' })
         claude_code_settings  = $claudeCodeObj
+        managed_policy        = $managedPolicy
         workspaces            = $workspaces
         org_uuid              = $(if ($script:WsOrgUuid) { $script:WsOrgUuid } else { '' })
         warn_count            = [int]$script:WarnCount
@@ -4091,6 +4260,16 @@ function Render-Json {
     foreach ($aKey in $arrayKeys) {
         if ($null -eq $redacted[$aKey] -or ($redacted[$aKey] -is [array] -and $redacted[$aKey].Count -eq 0)) {
             $redacted[$aKey] = [System.Collections.Generic.List[object]]::new()
+        }
+    }
+
+    # Same fix for nested arrays inside managed_policy
+    if ($redacted['managed_policy']) {
+        foreach ($mpKey in @('files_found','legacy_paths_found','managed_mcp','settings_keys')) {
+            $mpVal = $redacted['managed_policy'][$mpKey]
+            if ($null -eq $mpVal -or ($mpVal -is [array] -and $mpVal.Count -eq 0)) {
+                $redacted['managed_policy'][$mpKey] = [System.Collections.Generic.List[object]]::new()
+            }
         }
     }
 
@@ -4179,6 +4358,7 @@ function Invoke-Audit {
     Collect-ScheduledTasks
     Collect-Blocklist -ClaudeDir $claudeDir
     Collect-ClaudeCodeSettings -HomeDir $HomeDir
+    Collect-ClaudeCodeManagedPolicy
     Collect-Runtime -ClaudeDir $claudeDir -HomeDir $HomeDir
 
     # Count findings by severity
